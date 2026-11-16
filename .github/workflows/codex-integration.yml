@@ -1,0 +1,19 @@
+name: Codex isolated Windows checks
+on:
+  push:
+    paths: ['integrations/codex/**', '.github/workflows/codex-integration.yml']
+  pull_request:
+    paths: ['integrations/codex/**', '.github/workflows/codex-integration.yml']
+permissions:
+  contents: read
+jobs:
+  isolated:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm test
+        working-directory: integrations/codex
