@@ -33,7 +33,7 @@ properties.hwnd.description = '本工具 windows 返回的原生 HWND；输入�
 properties.path.description = 'open:要打开的本地绝对文件/文件夹/明确exe；capture:保存PNG绝对路径，可省略。open只发一次系统请求，不自动重试或移动共享实例旧窗。'
 const definition = {
   name: tool.name,
-  description: '控制权busy用control_request/control_wait/control_cancel排队；wait≤45秒，到期保持原执行器active并立即续wait，同票FIFO；ready后fresh观察再begin，无旧输入重放。主会话有独立工作时同一原CU子代理等待并用父子通道通知，不新建chat/后台模型。Stop/host end撤票，不自动续。仅新协议实例保证公平，官方状态unknown。Windows桌面默认独立输入后端。windows选择唯一hwnd，observe返回新鲜observationId/elementId及UIA树（includeScreenshot可选），click/type优先用本次两ID+hwnd，一个动作后重新observe；stale要求fresh observe后仅一次原动作，普通状态变化不是硬stop。兼容hwnd+屏幕绝对物理像素；不要传sky/cua opaque ID、逻辑坐标或截图ID。UIA/offscreen=false仅provider报告，不保证屏幕可见。includeScreenshot实际附图后先看图核对场景/目标；mappingVerified/occlusionSafe不验证业务fresh。无图不作视觉验收；画面与UIA不符仅只读fresh核对，报告观察不一致，不判点击无效或盲重试/改焦点/搬窗。capture报告方法/原点/尺寸/遮挡限制。auto/message仅走目标native窗口消息；元素ID仅支持已核标准Button/Edit，未知不回退provider。type mode:value仅fresh元素双ID+hwnd、无坐标，对可写Edit/ComboBox窄ValuePattern.SetValue+回读，不主动请求焦点但provider可能激活，不能保证DOM/input/change/React状态。type无坐标保留显式child；key x/y成对时选child，否则直投hwnd。显式uia调用provider可能SetFocus/激活，仅获允许时选择。不调用真实输入/官方CU，不自动fallback原生CU。begin不清暂停；finish隐藏overlay并锁住后续输入直到begin。active时物理Esc或pause锁暂停，普通键鼠不结束；用户明确继续才resume。宿主stop/end/拒绝仍立即停止，不可绕过。',
+  description: '控制权busy用control_request/control_wait/control_cancel排队；wait≤45秒，到期保持原执行器active并立即续wait，同票FIFO；ready后fresh观察再begin，无旧输入重放。主会话有独立工作时同一原CU子代理等待并用父子通道通知，不新建chat/后台模型。Stop/host end撤票，不自动续。仅新协议实例保证公平，官方状态unknown。Windows桌面默认独立输入后端。windows选择唯一hwnd，observe返回新鲜observationId/elementId及UIA树（includeScreenshot可选），click/type优先用本次两ID+hwnd，一个动作后重新observe；stale要求fresh observe后仅一次原动作，普通状态变化不是硬stop。兼容hwnd+屏幕绝对物理像素；不要传sky/cua opaque ID、逻辑坐标或截图ID。UIA/offscreen=false仅provider报告，不保证屏幕可见。includeScreenshot实际附图后先看图核对场景/目标；mappingVerified/occlusionSafe不验证业务fresh。无图不作视觉验收；画面与UIA不符仅只读fresh核对，报告观察不一致，不判点击无效或盲重试/改焦点/搬窗。capture报告方法/原点/尺寸/遮挡限制。auto/message仅走目标native窗口消息；元素ID仅支持已核标准Button/Edit，未知不回退provider。type mode:value仅fresh元素双ID+hwnd、无坐标，对可写Edit/ComboBox窄ValuePattern.SetValue+回读，不主动请求焦点但provider可能激活，不能保证DOM/input/change/React状态。type无坐标保留显式child；key x/y成对时选child，否则直投hwnd。显式uia调用provider可能SetFocus/激活，仅获允许时选择。不调用真实输入/官方CU，不自动fallback原生CU。begin不清暂停；finish隐藏overlay并锁住后续输入直到begin。active时物理Ctrl+Esc或pause锁暂停，普通键鼠不结束；用户明确继续才resume。宿主stop/end/拒绝仍立即停止，不可绕过。',
   inputSchema: { type: 'object', properties, required: ['action'], additionalProperties: false },
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
 }
@@ -73,7 +73,7 @@ async function handle(message, requestOptions={}) {
   switch (message.method) {
     case 'initialize': return {
       protocolVersion: versions.includes(message.params?.protocolVersion) ? message.params.protocolVersion : versions[0],
-      capabilities: { tools: {} }, serverInfo: { name: 'dsh-independent-input', version: '0.6.0' },
+      capabilities: { tools: {} }, serverInfo: { name: 'dsh-independent-input', version: '0.6.1' },
     }
     case 'ping': return {}
     case 'tools/list': return { tools: [definition] }

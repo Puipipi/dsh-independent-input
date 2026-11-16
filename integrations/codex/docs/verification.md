@@ -56,3 +56,12 @@ These are selected non-identity fields from three preserved formal MCP replies, 
 ```
 
 The single-holder reminder/no-repeat behavior was reported by the actual executor (two later status responses); no preserved full raw body is claimed for those two reports. `delivered-to-tool` is delivery metadata, not proof of model attention. No direct message was sent to the other holder.
+
+
+## 0.6.1 stop-gesture change (method tests only)
+
+The plugin now accepts physical **Ctrl+Esc** only while active and not already paused. Either Ctrl is accepted; Shift, Alt or either Win key excludes the gesture (in particular Ctrl+Shift+Esc is untouched). Plain Esc, Ctrl itself, injected Esc, idle and newly pressed paused gestures pass through. Only a successfully recorded stop captures that Esc's down/repeats and matching up; a fresh active lifecycle clears any stale capture. The compatible Ctrl+Alt+Q path is unchanged. The application-level `key:escape` parser and host/official-CU cancellation flags are unchanged; real host-ended/refusal must still stop input.
+
+New stops carry `reason:control-escape`, `source:keyboard-hook` and `keyboard.gesture:Ctrl+Esc` with modifier/trigger metadata. Old `escape` records retain their original Esc interpretation. The compiled production helper is tested with explicit modifier states, without installing a hook or sending real keys. This establishes the filtering/paired-release contract, not actual Windows Start-menu suppression or host behavior under physical keys. Those GUI effects are not claimed as tested here. Historical 0.6.0 CI/live results above remain historical.
+
+The MCP cancellation test now uses bounded protocol conditions instead of a fixed 2500ms cleanup sleep or a 5-second speed assertion: status must return while the original wait remains pending, cancellation must wake that wait without timeout, and the cancelled ticket must disappear without pausing the holder. Each condition has a 30-second deadline and the case has a 120-second overall deadline. This is test synchronization only; the queue core is unchanged.

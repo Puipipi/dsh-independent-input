@@ -79,7 +79,7 @@ function statusText(s) {
   if (s?.paused) {
     lines.push('⚠ 主人已经暂停/接管输入。不要继续操作；等主人说“继续”，再调用 action:"resume"。')
   } else {
-    lines.push(`主人随时可按 ${s?.hotkey || 'Esc（active时）或Ctrl+Alt+Q'} 暂停。`)
+    lines.push(`主人随时可按 ${s?.hotkey || 'Ctrl+Esc（active时）或Ctrl+Alt+Q'} 暂停。`)
   }
   return lines.join('\n')
 }
@@ -161,7 +161,7 @@ function resultText(action, r) {
 function toolSpec() {
   return {
     name: 'independent_input',
-    description: 'Windows桌面默认独立输入。先status/windows确定授权hwnd，observe返回provider报告的UIA与可选截图；UIA/offscreen=false不保证当前可见，mappingVerified/occlusionSafe不验证业务内容fresh。有图先看实际画面，冲突仅只读fresh核对，不盲重试或自动改焦点/搬窗/切官方CU。用observationId+elementId执行一次click/type再observe。旧hwnd+物理坐标兼容。窗口capture不屏幕回退；mappingVerified=false不能从图片推坐标，显式rect/full为遮挡不安全的screen-copy。bounds仅授权搬窗，不激活。physical禁用，不主动移动系统鼠标/设置焦点；应用自身可能改变焦点。idle输入或begin开始，finish收尾且后续须begin；active物理Esc/CtrlAltQ暂停，begin不清暂停，resume仅用户明确继续。普通键鼠不结束。遵守宿主stop/权限，不自动切原生CUA。',
+    description: 'Windows桌面默认独立输入。先status/windows确定授权hwnd，observe返回provider报告的UIA与可选截图；UIA/offscreen=false不保证当前可见，mappingVerified/occlusionSafe不验证业务内容fresh。有图先看实际画面，冲突仅只读fresh核对，不盲重试或自动改焦点/搬窗/切官方CU。用observationId+elementId执行一次click/type再observe。旧hwnd+物理坐标兼容。窗口capture不屏幕回退；mappingVerified=false不能从图片推坐标，显式rect/full为遮挡不安全的screen-copy。bounds仅授权搬窗，不激活。physical禁用，不主动移动系统鼠标/设置焦点；应用自身可能改变焦点。idle输入或begin开始，finish收尾且后续须begin；active物理Ctrl+Esc/CtrlAltQ暂停，begin不清暂停，resume仅用户明确继续。普通键鼠不结束。遵守宿主stop/权限，不自动切原生CUA。',
     parameters: {
       waitMs: {type:'number',description:'control_wait：单次等待0–45000ms；超时不授锁、不重放输入'},
       action: {

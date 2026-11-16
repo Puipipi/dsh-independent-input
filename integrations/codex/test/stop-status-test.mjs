@@ -23,3 +23,5 @@ try{
  paused=false;const resumed=await tool.execute({action:'status'});assert.equal(resumed.meta.paused,false);assert.equal(resumed.meta.stopInfo,null);assert.match(resumed.text,/最近停止（当前未暂停）/)
  console.log('PASS actual status formatting: short source/time; unknown keyboard origin; no identity in human text; machine IDs retained; details-only key fields; resumed history is not current pause')
 }finally{dispose?.();InputEngine.prototype.request=original;await rm(directory,{recursive:true,force:true})}
+
+const {stopText}=await import('../lib/stop-info.js');assert.match(stopText({reason:'control-escape',source:'keyboard-hook'}),/Ctrl\+Esc/);assert.ok(!stopText({reason:'escape',source:'keyboard-hook'}).includes('Ctrl+Esc'));console.log('PASS new Ctrl+Esc versus legacy Esc source labels remain distinct')

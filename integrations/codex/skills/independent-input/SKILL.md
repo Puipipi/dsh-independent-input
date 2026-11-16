@@ -19,7 +19,7 @@ description: Windows桌面默认独立输入（dsh-independent-input、多鼠标
 
 旧click/type/key/scroll/drag带hwnd与坐标仍兼容。physical永远禁止；move仅移动AI光标。bounds仅在用户授权搬窗时使用hwnd、物理x/y/width/height，保持不激活、不改变zorder；最小化/最大化窗口拒绝调整，不自动恢复。windows/status提供monitor和workArea。成功投递或UIA调用不等于应用结果成功，动作后观察确认。应用不支持消息/UIA时报告限制，不改真实输入或官方CUA。
 
-只读操作不开始控制。第一条兼容输入可从idle开始，或显式begin。完成整段任务时finish隐藏overlay并锁后续输入，直到显式begin。active期间物理Esc立即锁暂停，Ctrl+Alt+Q兼容；普通键鼠不结束控制。begin不能清暂停，只有用户明确继续才resume。逐步消息序列在暂停后停止后续投递，仅释放同目标已按键；单次UIA/同步调用不可中途撤回。宿主stopped/ended、拒绝或用户明确停止必须立即遵守；resume/begin不恢复宿主授权。只允许一个完整活动回合的电脑执行器，不因每次toolcall结束而finish。
+只读操作不开始控制。第一条兼容输入可从idle开始，或显式begin。完成整段任务时finish隐藏overlay并锁后续输入，直到显式begin。active期间物理Ctrl+Esc立即锁暂停，Ctrl+Alt+Q兼容；普通键鼠不结束控制。begin不能清暂停，只有用户明确继续才resume。逐步消息序列在暂停后停止后续投递，仅释放同目标已按键；单次UIA/同步调用不可中途撤回。宿主stopped/ended、拒绝或用户明确停止必须立即遵守；resume/begin不恢复宿主授权。只允许一个完整活动回合的电脑执行器，不因每次toolcall结束而finish。
 
 本插件不修改官方CUA，不主动SendInput/SetFocus/SetForegroundWindow。应用自身收到动作可能改变焦点。入口不可见要报告并按正式宿主刷新；仅宿主允许且用户批准时接入已安装manifest/.mcp.json的持久标准MCP，不导入engine、不用模块绕受限REPL、不临时call-once反复重置会话。新app-server成功不等于旧聊天热加载。
 
@@ -44,7 +44,7 @@ observe默认紧凑public元素，内部完整签名/原生归属不省略；det
 
 优先元素ID后台动作；坐标兼容动作建议带observe返回的windowObservationId，独立于元素IDs，仅核根runtime/几何并消费一次，不保证内容/图像原子性。不带guard仍是旧兼容，不能宣称已防旧坐标。stale fresh后仅派一次原动作。一次动作后的fresh observe可直接作为下一动作观察，不必每步重复status/windows/observe。
 
-宿主cancel/断连会out-of-band锁暂停并终止旧executor；真实Esc/API暂停跨故障重启保留，begin不能清，用户明确继续才resume。普通后台超时是fault而非撤权：结果可能已部分发生，旧executor有界收尾；先重新观察效果，再显式begin恢复，禁止盲重放。旧executor退出未证实会阻止新executor，不并行启动。pause/partial不是零动作保证。EOF立即取消队列、停止自身capture helper；不关闭open启动的目标应用。原生消息写入超时按结果未知处理，不二次发送。
+宿主cancel/断连会out-of-band锁暂停并终止旧executor；真实Ctrl+Esc/API暂停跨故障重启保留，begin不能清，用户明确继续才resume。普通后台超时是fault而非撤权：结果可能已部分发生，旧executor有界收尾；先重新观察效果，再显式begin恢复，禁止盲重放。旧executor退出未证实会阻止新executor，不并行启动。pause/partial不是零动作保证。EOF立即取消队列、停止自身capture helper；不关闭open启动的目标应用。原生消息写入超时按结果未知处理，不二次发送。
 
 
 保焦点策略：settings.json中的focusPolicy仅接受preserve（默认）或allow-activation（需用户明确自行开启）；它是runtime启动配置，不是tool参数，没有临时放行入口。preserve拒绝显式uia click/type/key/scroll/drag等输入，返回focus-policy-preserve、inputSent:false、providerCalled:false；不偷偷改成前台动作。先用支持的auto/message后台路径；不支持就报告限制。不要把“UIA provider未调用”扩大成“应用永不自行激活”。检测到escape仅报告工具判定，旧日志无足够来源字段时不能断言用户按了实体Esc；不忽略真实停止，也不擅自修改锁鼠。
@@ -53,7 +53,7 @@ observe默认紧凑public元素，内部完整签名/原生归属不省略；det
 
 控制锁是本插件程序强制：可信_meta.threadId为执行ID，同Windows用户/桌面session跨CODEX_HOME共享。先status.control看owner；busy则不得抢占或另开client。非owner begin/finish/hide和输入均拒绝；同owner controlled动作串行，finish与release为一项。只读status不拿锁、不Show。外部官方CU为unknown，本锁不能拦截官方CU或仍在运行的旧版0.4.5。
 
-Esc/pause/宿主stop为持久全局暂停，begin不能清。仅用户明确继续才resume；显式resume可在旧executor已确认dead后以新可信执行ID恢复，alive/unknown仍拒绝。正常finish且未暂停才放锁；timeout不偷、故障旧executor未退不重绑。
+Ctrl+Esc/pause/宿主stop为持久全局暂停，begin不能清。仅用户明确继续才resume；显式resume可在旧executor已确认dead后以新可信执行ID恢复，alive/unknown仍拒绝。正常finish且未暂停才放锁；timeout不偷、故障旧executor未退不重绑。
 
 不要capture本插件光标/header/tooltip HWND；程序以反馈窗口身份拒绝，避免自检触发系统WGC捕获边框。改截目标应用，必要status(details:true)读取实际UI状态，不以对光标重复WGC验收动画。设置页手动预览为独立内部主体，同样受锁，仅支持预览/收起/用户明确继续预览。
 
@@ -71,6 +71,8 @@ Esc/pause/宿主stop为持久全局暂停，begin不能清。仅用户明确继�
 
 若只剩CU等待，保持当前执行器active turn，不因排队或一次wait超时Final；立即续control_wait保持原票，直到ready或用户stop。若主会话还有独立工作，由同一个原CU Terra子代理在当前active turn持续wait，主会话继续独立工作；ready由wait真实返回，再用既有父子消息通道报告主会话，按原授权/唯一执行器条件fresh observe→begin。主会话依赖CU结果时等待该子代理，不忙轮询status。不得新建可见chat/后台模型/专门调度器或跨项目派任务。用户Stop/host end必须取消自己的票，不能自动续任务。该工作流支持等待请求返回和父子通知，不支持主动唤醒已经闲置的chat，也不承诺强制模型遵守。
 
-每次实际持有有独立leaseId；存在排队时，owner下一次工具回执最多提醒一次“做完本次桌面任务请finish”，不中断在途动作。队列清空再加入也不重复；排队在首次提醒前取消为空则不发。reminderStatus仅queued/unknown/delivered-to-tool，不代表模型已读。正常任务做完finish释放；Esc/host-stop仍暂停，handoff不清暂停。
+每次实际持有有独立leaseId；存在排队时，owner下一次工具回执最多提醒一次“做完本次桌面任务请finish”，不中断在途动作。队列清空再加入也不重复；排队在首次提醒前取消为空则不发。reminderStatus仅queued/unknown/delivered-to-tool，不代表模型已读。正常任务做完finish释放；Ctrl+Esc/host-stop仍暂停，handoff不清暂停。
 
 compact observe的backgroundActions:type:value表示provider报告具备窄Value写入条件；仍需fresh双ID＋hwnd，验证只限Value回读，不表示控件当前视觉可见或系统焦点不变。不会改变auto/native默认路径。
+
+0.6.1当前停止手势：仅active物理Ctrl+Esc（左右Ctrl任一，不能带Shift/Alt/Win）暂停本插件；单Esc不暂停本插件。仅接受该停止时拦截Esc down及配对重复/up，Ctrl自身不拦截，idle/已paused的新手势正常透传。Ctrl+Alt+Q兼容保留。此设置不改变Codex/官方CU的Esc或host-ended/refusal，宿主停止仍立即遵守；旧escape历史仍按单Esc来源解释。实际Windows开始菜单不弹出的GUI验证尚待授权实测。

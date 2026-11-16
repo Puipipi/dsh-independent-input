@@ -381,7 +381,10 @@ public static class DshInput
     static long lastInjectedTick = 0;
 
     public static volatile bool Paused = false;
-    public static volatile bool SessionActive = false;
+    static volatile bool sessionActive = false;
+    public static bool SessionActive { get { return sessionActive; } set { lock(stopSync) { if(value&&!sessionActive) capturedStopEscape=false; sessionActive=value; } } }
+    static bool capturedStopEscape=false;
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
     public static volatile bool PhysicalActive = false;
     public static string PauseReason = "";
     public static int UserActiveMs = 800;
@@ -513,25 +516,36 @@ public static class DshInput
             LastStop=StopInfo;PauseReason=reason;Paused=true;return true;
         }
     }
-    public static bool RecordKeyStop(uint vkCode,uint scanCode,uint flags,int eventType) {
-        if(!SessionActive||(eventType!=WM_KEYDOWN&&eventType!=WM_SYSKEYDOWN)||vkCode!=0x1B||(flags&LLKHF_INJECTED)!=0)return false;
-        return RecordStop("escape","keyboard-hook",new Dictionary<string,object>{{"vkCode",vkCode},{"scanCode",scanCode},{"flags",flags},{"injected",(flags&LLKHF_INJECTED)!=0},{"eventType",eventType}});
+    public static bool RecordKeyStop(uint vkCode,uint scanCode,uint flags,int eventType,bool leftControl,bool rightControl,bool otherModifiers) {
+        if(!SessionActive||Paused||otherModifiers||(!leftControl&&!rightControl)||(eventType!=WM_KEYDOWN&&eventType!=WM_SYSKEYDOWN)||vkCode!=0x1B||(flags&LLKHF_INJECTED)!=0)return false;
+        return RecordStop("control-escape","keyboard-hook",new Dictionary<string,object>{{"gesture","Ctrl+Esc"},{"leftControl",leftControl},{"rightControl",rightControl},{"vkCode",vkCode},{"scanCode",scanCode},{"flags",flags},{"injected",false},{"eventType",eventType}});
+    }
+    // 0=pass, 1=accepted stop+consume, 2=consume the accepted Esc repeat/up.
+    // Ctrl keys and arbitrary keyboard contents are neither captured nor logged.
+    public static int FilterStopKey(uint vkCode,uint scanCode,uint flags,int eventType,bool leftControl,bool rightControl,bool otherModifiers) {
+        if(vkCode!=0x1B||(flags&LLKHF_INJECTED)!=0)return 0;
+        lock(stopSync) {
+            if(capturedStopEscape) {
+                if(eventType==WM_KEYUP||eventType==WM_SYSKEYUP){capturedStopEscape=false;return 2;}
+                if(eventType==WM_KEYDOWN||eventType==WM_SYSKEYDOWN)return 2;
+            }
+            if(RecordKeyStop(vkCode,scanCode,flags,eventType,leftControl,rightControl,otherModifiers)){capturedStopEscape=true;return 1;}
+            return 0;
+        }
     }
     static IntPtr EscapeHookProc(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0 && SessionActive && (wParam.ToInt32() == WM_KEYDOWN || wParam.ToInt32() == WM_SYSKEYDOWN))
-        {
-            KBDLLHOOKSTRUCT data = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
-            if (RecordKeyStop(data.vkCode,data.scanCode,data.flags,wParam.ToInt32()))
-            {
-                ThreadPool.QueueUserWorkItem(delegate {
-                    EmitPauseState();
-                    if (Paused && PauseReason == "escape") DshOverlay.SetPaused(true);
-                });
+        if(nCode>=0) {
+            KBDLLHOOKSTRUCT data=(KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam,typeof(KBDLLHOOKSTRUCT));
+            if(data.vkCode==0x1B&&(data.flags&LLKHF_INJECTED)==0) {
+                bool left=(GetAsyncKeyState(0xA2)&0x8000)!=0,right=(GetAsyncKeyState(0xA3)&0x8000)!=0;
+                bool other=(GetAsyncKeyState(0x10)&0x8000)!=0||(GetAsyncKeyState(0x12)&0x8000)!=0||(GetAsyncKeyState(0x5B)&0x8000)!=0||(GetAsyncKeyState(0x5C)&0x8000)!=0;
+                int disposition=FilterStopKey(data.vkCode,data.scanCode,data.flags,wParam.ToInt32(),left,right,other);
+                if(disposition==1)ThreadPool.QueueUserWorkItem(delegate {EmitPauseState();if(Paused&&PauseReason=="control-escape")DshOverlay.SetPaused(true);});
+                if(disposition!=0)return new IntPtr(1);
             }
         }
-        // Observe Escape only. Never swallow, rewrite, or record key contents.
-        return CallNextHookEx(escapeHook, nCode, wParam, lParam);
+        return CallNextHookEx(escapeHook,nCode,wParam,lParam);
     }
 
     public static void StartHotkey()
@@ -2131,7 +2145,7 @@ function Get-StatusResult {
     overlayRect = [DshOverlay]::Bounds()
     overlayHwnd = [DshOverlay]::HandleId()
     screenIndicator = @{ visible = [DshOverlay]::HeaderVisible(); rect = [DshOverlay]::HeaderBounds(); text = [DshOverlay]::HeaderText([DshInput]::Paused); hwnd = [DshOverlay]::HeaderHandle(); monitor = [DshOverlay]::HeaderMonitor(); renderBackend = 'update-layered-window'; renderSucceeded = [DshOverlay]::HeaderRenderSucceeded(); renderError = [DshOverlay]::HeaderRenderError() }
-    hotkey = 'Ctrl+Alt+Q'
+    hotkey = 'Ctrl+Esc（active时）或Ctrl+Alt+Q'
     hotkeyRegistered = [DshInput]::HotkeyRegistered
     escapeHookRegistered = [DshInput]::EscapeHookRegistered
     sessionState = if ($script:SessionFinished) { 'finished' } elseif ([DshInput]::SessionActive) { 'active' } else { 'idle' }
@@ -2758,8 +2772,8 @@ $ready = @{
   event = 'ready'
   pid = $PID
   uia = $script:uia
-  hotkey = 'Ctrl+Alt+Q'
-  version = '0.5.2'
+  hotkey = 'Ctrl+Esc（active时）或Ctrl+Alt+Q'
+  version = '0.6.1'
 }
 [Console]::Out.WriteLine((ConvertTo-Json $ready -Compress))
 [Console]::Out.Flush()

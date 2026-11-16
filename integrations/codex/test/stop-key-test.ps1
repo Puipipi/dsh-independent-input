@@ -9,17 +9,41 @@ $source=[IO.File]::ReadAllText((Join-Path $SourceRoot 'sidecar.ps1')).Replace("`
 $start=$source.IndexOf('$cs = @'+"'`n")+9;$end=$source.IndexOf("`n'@",$start)
 Add-Type -TypeDefinition $source.Substring($start,$end-$start) -ReferencedAssemblies @([System.Web.Script.Serialization.JavaScriptSerializer].Assembly.Location,[System.Windows.Forms.Form].Assembly.Location,[Drawing.Point].Assembly.Location)
 [DshInput]::SetStopOwner('{"executionId":"fixture-execution","rootId":"fixture-root","name":"测试主聊天"}')
+function Check($expected,$vk,$flags,$event,$left,$right,$other){$actual=[DshInput]::FilterStopKey($vk,1,$flags,$event,$left,$right,$other);if($actual-ne$expected){throw "Disposition expected=$expected actual=$actual"}}
+[DshInput]::SessionActive=$false
+Check 0 27 0 256 $true $false $false
 [DshInput]::SessionActive=$true
-foreach($case in @(@(65,30,0,256),@(27,1,16,256),@(27,1,0,257))){if([DshInput]::RecordKeyStop($case[0],$case[1],$case[2],$case[3])){throw 'non-stopping keyboard event recorded'}}
-if([DshInput]::StopInfo){throw 'keyboard history must not be created'}
-if(-not [DshInput]::RecordKeyStop(27,1,0,256)){throw 'Esc did not create stop record'}
+Check 0 27 0 256 $false $false $false # plain Esc
+Check 0 27 16 256 $true $false $false # injected Esc
+Check 0 27 0 257 $true $false $false # unpaired up
+foreach($vk in @(162,163)){Check 0 $vk 0 256 $true $false $false;Check 0 $vk 0 257 $false $false $false}
+# Shift/Alt/Win are queried individually by callback and collapse into other.
+foreach($modifier in @('Shift','Alt','LeftWin','RightWin')){Check 0 27 0 256 $true $false $true}
+if([DshInput]::StopInfo){throw 'Non-stop keyboard history recorded'}
+Check 1 27 0 256 $true $false $false
 $first=[DshInput]::StopInfo
-if($first.source -ne 'keyboard-hook' -or $first.reason -ne 'escape' -or $first.keyboard.vkCode -ne 27 -or $first.keyboard.scanCode -ne 1 -or $first.keyboard.injected -ne $false -or -not $first.utcTimestamp -or $first.ownerName -ne '测试主聊天'){throw 'actual Esc metadata incomplete'}
-if([DshInput]::RecordStop('transport-eof','transport-eof',$null)){throw 'EOF replaced the original stop'}
-if([DshInput]::StopInfo.utcTimestamp -ne $first.utcTimestamp -or [DshInput]::StopInfo.source -ne 'keyboard-hook'){throw 'original Esc source/time changed'}
+if($first.reason-ne'control-escape'-or$first.source-ne'keyboard-hook'-or$first.keyboard.gesture-ne'Ctrl+Esc'-or-not$first.keyboard.leftControl-or$first.keyboard.rightControl-or$first.keyboard.injected-or-not$first.utcTimestamp){throw 'Ctrl+Esc provenance'}
+Check 2 27 0 256 $false $false $false # Ctrl released, repeat still paired
+Check 0 27 16 257 $false $false $false # injected up cannot clear latch
+Check 2 27 0 257 $false $false $false
+Check 0 27 0 256 $true $false $false # already paused: no new capture
+if([DshInput]::StopInfo.sequence-ne$first.sequence){throw 'repeat created another stop'}
+if([DshInput]::RecordStop('transport-eof','transport-eof',$null)){throw 'EOF replaced origin'}
 [DshInput]::Resume()
-if([DshInput]::Paused -or [DshInput]::StopInfo -or [DshInput]::LastStop.source -ne 'keyboard-hook'){throw 'resume/current versus history mismatch'}
-if(-not [DshInput]::RecordKeyStop(27,1,0,260)){throw 'second Esc event missing'}
-if([DshInput]::StopInfo.sequence -le $first.sequence){throw 'new independent stop reused old event'}
-if([DshOverlay]::HeaderVisible()){throw 'stop-record test initialized UI'}
-'PASS actual C# Esc filter/record: no other key/injected/key-up history; trigger fields+UTC+owner; EOF preserves original; resume retains historical stop; second event increments; no hooks/windows/input'
+Check 1 27 0 260 $false $true $false # right Ctrl/sys-keydown
+if([DshInput]::StopInfo.sequence-le$first.sequence-or-not[DshInput]::StopInfo.keyboard.rightControl){throw 'new right Ctrl event'}
+Check 2 27 0 261 $false $false $false
+[DshInput]::Resume()
+Check 1 27 0 256 $true $false $false
+[DshInput]::SessionActive=$false
+Check 2 27 0 257 $false $false $false # finish still pairs accepted up
+[DshInput]::SessionActive=$true
+[DshInput]::Resume()
+Check 1 27 0 256 $true $false $false
+[DshInput]::SessionActive=$false
+[DshInput]::SessionActive=$true # fresh lifecycle discards stale capture
+[DshInput]::Resume()
+Check 0 27 0 256 $false $false $false
+Check 0 27 0 257 $false $false $false
+if([DshOverlay]::HeaderVisible()){throw 'UI initialized'}
+'PASS compiled actual stop helper: plain/injected/idle/paused/modifiers pass; either Ctrl exact gesture one stop; only accepted Esc repeats/up consumed; no sticky latch across lifecycle; Ctrl keys pass; no hook/window/input'

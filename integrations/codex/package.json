@@ -1,6 +1,6 @@
 {
   "name": "dsh-independent-input",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "type": "module",
   "description": "独立鼠标键盘：UIA只读观察与目标hwnd后台消息；默认保焦点策略拒绝provider输入，应用自身仍可能激活；设置页总开关，关掉后不执行任何动作。",
   "main": "index.js",
