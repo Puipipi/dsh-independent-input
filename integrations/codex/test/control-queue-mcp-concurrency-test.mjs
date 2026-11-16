@@ -22,8 +22,8 @@ try{
  const missing=await bounded(send('control_request',null).promise);assert.ok(missing.result.isError);assert.ok((await bounded(send('status').promise)).result)
  const abandoned=send('control_request');cancelNotification(abandoned.id)
  await until(async()=>{const s=await lease.status('owner-A');assert.equal(s.ownerExecutionId,'owner-A');assert.equal(s.pauseReason,null);return s.queue.length===0},'cancelled request ticket absent')
- // A normal subsequent queue operation acts as a protocol barrier: ensure the
- // cancelled enqueue cannot arrive after the absence observation.
+ // Start a subsequent queue lifecycle. Assertions below check that the wait
+ // remains pending during status and that no ticket remains at completion.
  const request=await bounded(send('control_request').promise);assert.equal(meta(request).control.position,1)
  const wait=send('control_wait');let settled=false;wait.promise.then(()=>settled=true)
  await until(async()=> (await lease.status('owner-A')).queue.length===1,'wait ticket registered')
