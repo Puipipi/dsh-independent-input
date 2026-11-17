@@ -1,4 +1,4 @@
-import {sanitizePublic} from './lib/auth-privacy.js'
+import {sanitizePublic,sanitizePublicError} from './lib/auth-privacy.js'
 /**
  * dsh-independent-input · 独立鼠标键盘
  *
@@ -413,7 +413,7 @@ export async function apply(ctx, rawConfig = {}, runtime = {}) {
   }
 
   const execute=tool.execute
-  tool.execute=async args=>sanitizePublic(await execute(args))
+  tool.execute=async(...args)=>{try{return sanitizePublic(await execute(...args))}catch(error){throw sanitizePublicError(error)}}
   const dispose = ctx.tools.register(defineTool(tool))
 
   const applySettings = async (next) => {
