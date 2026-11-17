@@ -1,6 +1,6 @@
 {
   "name": "dsh-independent-input",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "type": "module",
   "description": "独立鼠标键盘：UIA只读观察与目标hwnd后台消息；默认保焦点策略拒绝provider输入，应用自身仍可能激活；设置页总开关，关掉后不执行任何动作。",
   "main": "index.js",
@@ -41,7 +41,8 @@
     "test:native-messages": "powershell.exe -NoLogo -NoProfile -File test/native-message-test.ps1",
     "test:presentation": "node test/presentation-test.mjs",
     "test:focus-policy": "node test/focus-policy-test.mjs",
-    "test": "node scripts/verify.mjs"
+    "test": "node scripts/verify.mjs",
+    "test:tooltip": "powershell.exe -NoProfile -File test/tooltip-render-test.ps1"
   },
   "keywords": [
     "dsh",

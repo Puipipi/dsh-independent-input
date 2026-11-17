@@ -1618,7 +1618,28 @@ public static class DshOverlay
         public SessionTip(){FormBorderStyle=FormBorderStyle.None;ShowInTaskbar=false;StartPosition=FormStartPosition.Manual;BackColor=Color.FromArgb(38,32,61);ForeColor=Color.White;Opacity=.96;Font=new Font("Segoe UI",9);}
         protected override bool ShowWithoutActivation {get{return true;}}
         protected override CreateParams CreateParams {get{var p=base.CreateParams;p.ExStyle|=0x08000000|0x00000020|0x00080000|0x00000080;return p;}}
-        public void Display(Rectangle sprite,string text){caption=text;Size size=TextRenderer.MeasureText(text,Font);int width=Math.Min(420,Math.Max(110,size.Width+16)),height=28;Rectangle work=DshInput.MonitorAtRectangle(sprite).WorkingArea;int x=Math.Max(work.Left,Math.Min(sprite.Left,work.Right-width));int y=sprite.Bottom+4;if(y+height>work.Bottom)y=Math.Max(work.Top,sprite.Top-height-4);if(!Visible)Show();DshInput.SetWindowPos(Handle,new IntPtr(-1),x,y,width,height,0x0010|0x0040);Invalidate();}
+        Rectangle anchorSprite;
+        bool layingOut;
+        Size MeasureCaption(){Size size=TextRenderer.MeasureText(caption,Font);return new Size(Math.Min(420,Math.Max(110,size.Width+16)),Math.Max(28,size.Height+8));}
+        Rectangle CaptionBounds(Rectangle sprite,Rectangle work){
+            Size size=MeasureCaption();int width=size.Width,height=size.Height;
+            int x=Math.Max(work.Left,Math.Min(sprite.Left,work.Right-width)),y=sprite.Bottom+4;
+            if(y+height>work.Bottom)y=Math.Max(work.Top,sprite.Top-height-4);
+            return new Rectangle(x,y,width,height);
+        }
+        void RelayoutCaption(){
+            if(layingOut||string.IsNullOrEmpty(caption))return;
+            layingOut=true;
+            try {
+                Rectangle bounds=CaptionBounds(anchorSprite,DshInput.MonitorAtRectangle(anchorSprite).WorkingArea);
+                if(!IsHandleCreated||!Visible){Bounds=bounds;return;}
+                DshInput.SetWindowPos(Handle,new IntPtr(-1),bounds.X,bounds.Y,bounds.Width,bounds.Height,0x0010|0x0040);
+                Invalidate();
+            } finally {layingOut=false;}
+        }
+        protected override void OnFontChanged(EventArgs e){base.OnFontChanged(e);RelayoutCaption();}
+        protected override void OnDpiChanged(DpiChangedEventArgs e){base.OnDpiChanged(e);RelayoutCaption();}
+        public void Display(Rectangle sprite,string text){caption=text;anchorSprite=sprite;if(!Visible){RelayoutCaption();Show();}RelayoutCaption();Invalidate();}
         protected override void OnPaint(PaintEventArgs e){TextRenderer.DrawText(e.Graphics,caption,Font,new Rectangle(8,4,Width-16,Height-8),ForeColor,TextFormatFlags.EndEllipsis|TextFormatFlags.SingleLine);}
     }
 
@@ -2773,7 +2794,7 @@ $ready = @{
   pid = $PID
   uia = $script:uia
   hotkey = 'Ctrl+Esc（active时）或Ctrl+Alt+Q'
-  version = '0.6.1'
+  version = '0.6.2'
 }
 [Console]::Out.WriteLine((ConvertTo-Json $ready -Compress))
 [Console]::Out.Flush()

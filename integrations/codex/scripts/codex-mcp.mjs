@@ -73,7 +73,7 @@ async function handle(message, requestOptions={}) {
   switch (message.method) {
     case 'initialize': return {
       protocolVersion: versions.includes(message.params?.protocolVersion) ? message.params.protocolVersion : versions[0],
-      capabilities: { tools: {} }, serverInfo: { name: 'dsh-independent-input', version: '0.6.1' },
+      capabilities: { tools: {} }, serverInfo: { name: 'dsh-independent-input', version: '0.6.2' },
     }
     case 'ping': return {}
     case 'tools/list': return { tools: [definition] }

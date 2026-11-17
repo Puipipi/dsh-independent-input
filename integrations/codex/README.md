@@ -1,3 +1,5 @@
+0.6.2：会话名tooltip按实际文字测量行高保留原padding，并在首次显示/字体/DPI变化后重排，避免高DPI中文笔画裁切；Ctrl+Esc规则不变。
+
 0.6.1：本插件active停止手势改为Ctrl+Esc（左右Ctrl，排除Shift/Alt/Win）；单Esc不暂停本插件。宿主Esc/停止/拒绝规则不变，Ctrl+Alt+Q兼容保留。
 
 # Codex integration
@@ -19,7 +21,7 @@ Run the following from this directory using installed Visual Studio C++ tools an
 cmd /c native\window-capture\build.cmd
 $out = Join-Path $env:TEMP 'independent-input-package'
 powershell.exe -NoProfile -File scripts/package-codex.ps1 -OutputDirectory $out
-Expand-Archive -LiteralPath (Join-Path $out 'dsh-independent-input-codex-0.6.1.zip') -DestinationPath (Join-Path $out 'marketplace')
+Expand-Archive -LiteralPath (Join-Path $out 'dsh-independent-input-codex-0.6.2.zip') -DestinationPath (Join-Path $out 'marketplace')
 codex plugin marketplace add (Join-Path $out 'marketplace/dsh-independent-input') --json
 codex plugin add dsh-independent-input@dsh-independent-input-local --json
 codex plugin list --marketplace dsh-independent-input-local --json

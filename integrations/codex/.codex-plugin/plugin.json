@@ -1,6 +1,6 @@
 {
   "name": "dsh-independent-input",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Windows默认独立输入：UIA元素观察、WGC窗口截图、目标消息和Ctrl+Esc暂停，不调用原生CU。",
   "repository": "https://github.com/dongcaodeliyu/dsh-independent-input",
   "license": "MIT (code); see NOTICE for third-party cursor artwork",
