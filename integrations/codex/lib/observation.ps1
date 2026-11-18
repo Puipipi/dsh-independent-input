@@ -1,5 +1,18 @@
-﻿# Policy comes from startup settings/env, never from per-action tool arguments.
+﻿. (Join-Path $PSScriptRoot 'auth-privacy.ps1')
+# Policy comes from startup settings/env, never from per-action tool arguments.
 function Get-FocusPolicyBlock($req) {
+  if($req.mode -eq 'invoke' -and $script:focusPolicy -cne 'allow-activation') {
+    $foreground=[DshInput]::GetForegroundWindow()
+    if($foreground -eq [IntPtr]::Zero -or -not [DshInput]::IsWindow([IntPtr][long]$req.hwnd) -or [DshInput]::RootOf($foreground) -ne [IntPtr][long]$req.hwnd) {
+      return @{ok=$false;verified=$false;reason='invoke-requires-foreground-under-preserve';routeScope='element-invoke';attempted=$false;inputSent=$false;providerCalled=$false;focusRequested=$false}
+    }
+  }
+  if($req.mode -eq 'value' -and $script:focusPolicy -cne 'allow-activation') {
+    $foreground=[DshInput]::GetForegroundWindow()
+    if($foreground -eq [IntPtr]::Zero -or -not [DshInput]::IsWindow([IntPtr][long]$req.hwnd) -or [DshInput]::RootOf($foreground) -ne [DshInput]::RootOf([IntPtr][long]$req.hwnd)) {
+      return @{ok=$false;verified=$false;reason='value-requires-foreground-under-preserve';focusPolicy='preserve';attempted=$false;inputSent=$false;providerCalled=$false;note='严格保焦模式下，Value setter仅允许目标当前为系统前台根；未调用setter。后台请fresh核对renderer归属后使用已支持的message路径；不会激活目标或自动改设置。'}
+    }
+  }
   if($req.mode -eq 'uia' -and $script:focusPolicy -cne 'allow-activation') {
     return @{ok=$false;reason='focus-policy-preserve';focusPolicy='preserve';inputSent=$false;providerCalled=$false;note='保焦点策略已拒绝UIA provider输入；未调用provider、未发送输入。只读observe仍可用；使用受支持的auto/message后台路径，不支持则报告限制。'}
   }
@@ -8,6 +21,7 @@ function Get-FocusPolicyBlock($req) {
 
 # One process-local observation; IDs are locators, never permissions.
 $script:CurrentObservation = $null
+$script:LastObservationInvalidation = $null
 
 function Get-ObservationRoot([long]$hwnd) {
   return [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$hwnd)
@@ -83,6 +97,7 @@ function Get-ObservationNextSibling($element) {
 
 function New-InputObservation([long]$hwnd, [int]$limit = 150) {
   $script:CurrentObservation = $null
+  $script:LastObservationInvalidation = $null
   if ($limit -lt 1 -or $limit -gt 500) { return @{ ok = $false; reason = 'invalid-elements-limit' } }
   if (-not $script:uia) { return @{ ok = $false; reason = 'uia-unavailable' } }
   if (-not [DshInput]::IsWindow([IntPtr]$hwnd)) { return @{ ok = $false; reason = 'target-hwnd-invalid' } }
@@ -130,7 +145,7 @@ function New-InputObservation([long]$hwnd, [int]$limit = 150) {
     entries = $entries
   }
   $rect = [DshInput]::WindowRect([IntPtr]$hwnd)
-  return @{ ok = $true; observationId = $observationId; hwnd = $hwnd; window = @{ hwnd = $hwnd; title = [DshInput]::WindowTitle([IntPtr]$hwnd); rect = @{ x = $rect[0]; y = $rect[1]; width = $rect[2]; height = $rect[3] } }; coordinateSystem = 'screen-physical-pixels'; elements = @($nodes); truncated = $truncated; note = '元素ID仅属于本次观察；动作后重新observe。普通状态变化返回stale，不代表用户停止。' }
+  return (Protect-PublicObservation @{ ok = $true; observationId = $observationId; hwnd = $hwnd; window = @{ hwnd = $hwnd; title = [DshInput]::WindowTitle([IntPtr]$hwnd); rect = @{ x = $rect[0]; y = $rect[1]; width = $rect[2]; height = $rect[3] } }; coordinateSystem = 'screen-physical-pixels'; elements = @($nodes); truncated = $truncated; note = '元素ID仅属于本次观察；动作后重新observe。普通状态变化返回stale，不代表用户停止。' })
 }
 
 function Invoke-ObservedValue($req,$entry,$snapshot,$observation) {
@@ -151,6 +166,8 @@ function Invoke-ObservedValue($req,$entry,$snapshot,$observation) {
     # before one setter call, never append to an unguarded later value.
     if(-not [DshInput]::IsWindow([IntPtr]$req.hwnd) -or ($observation.root.GetRuntimeId() -join ',') -cne $observation.rootRuntimeId -or ([DshInput]::WindowRect([IntPtr]$req.hwnd) -join ',') -cne $observation.windowRect -or ((Get-ElementSnapshot $entry.element) | ConvertTo-Json -Depth 6 -Compress) -cne $entry.signature){return @{ok=$false;verified=$false;reason='stale-observation';refresh='observe';attempted=$false}}
     [DshInput]::CheckNotPaused()
+    $focusBlock=Get-FocusPolicyBlock $req
+    if($null-ne$focusBlock){return $focusBlock}
     $attempted=$true
     $pattern.SetValue($want)
     $readback=[Diagnostics.Stopwatch]::StartNew();$matched=$false
@@ -173,12 +190,44 @@ function Invoke-ObservedValue($req,$entry,$snapshot,$observation) {
   }
 }
 
+function Invoke-ObservedInvoke($req,$entry,$snapshot,$observation) {
+  $attempted=$false
+  try {
+    if([DshInput]::RootOf([IntPtr][long]$req.hwnd) -ne [IntPtr][long]$req.hwnd -or $snapshot.type -notin @('ControlType.Button','ControlType.Hyperlink') -or $snapshot.patterns -notcontains 'Invoke' -or $snapshot.password -or $snapshot.nativePassword){return @{ok=$false;verified=$false;reason='invoke-pattern-unsupported';routeScope='element-invoke';attempted=$false;inputSent=$false;providerCalled=$false}}
+    $block=Get-FocusPolicyBlock $req;if($null-ne$block){return $block}
+    $pattern=$entry.element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+    $x=[int]($snapshot.rect.x+$snapshot.rect.width/2);$y=[int]($snapshot.rect.y+$snapshot.rect.height/2)
+    Commit-InputSource $req;Show-InputIndicator $x $y
+    if(-not [DshInput]::IsWindow([IntPtr]$req.hwnd) -or ($observation.root.GetRuntimeId() -join ',') -cne $observation.rootRuntimeId -or ([DshInput]::WindowRect([IntPtr]$req.hwnd) -join ',') -cne $observation.windowRect -or ((Get-ElementSnapshot $entry.element)|ConvertTo-Json -Depth 6 -Compress) -cne $entry.signature){return @{ok=$false;verified=$false;reason='stale-observation';refresh='observe';attempted=$false;inputSent=$false;providerCalled=$false}}
+    [DshInput]::CheckNotPaused()
+    $block=Get-FocusPolicyBlock $req;if($null-ne$block){return $block}
+    $attempted=$true
+    $pattern.Invoke()
+    return @{ok=$true;verified=$false;via='uia-invoke-element';routeScope='element-invoke';attempted=$true;providerCalled=$true;inputSent=$true;verification='invoke-dispatch-only';focusRequested=$false;focusEffect='unverified';mayActivate=$true;hwnd=[long]$req.hwnd;targetRect=$snapshot.rect;x=$x;y=$y}
+  } catch {
+    $denied=$false;$exception=$_.Exception
+    while($exception){if($exception -is [UnauthorizedAccessException] -or $exception.HResult -eq -2147024891){$denied=$true};$exception=$exception.InnerException}
+    if($denied){[DshInput]::Pause('permission-refusal')}
+    return @{ok=$false;verified=$false;reason=if($denied){'permission-refusal'}elseif($attempted){'invoke-uncertain'}else{'invoke-not-applied'};routeScope='element-invoke';attempted=$attempted;providerCalled=$attempted;inputSent=if($attempted){$null}else{$false};partial=if($attempted){'possible'}else{$null};stopRequired=$denied;paused=[DshInput]::Paused;focusRequested=$false;focusEffect='unverified';mayActivate=$attempted;note='未自动重试、激活、坐标或其他后端回退；provider已调用时效果可能部分发生。'}
+  }
+}
+
+function Clear-InputObservation([string]$reason) {
+  $script:LastObservationInvalidation = if($script:CurrentObservation -and $script:CurrentObservation.id){@{id=[string]$script:CurrentObservation.id;reason=$reason}}else{$null}
+  $script:CurrentObservation = $null
+}
+function Get-StaleObservationResult([string]$id) {
+  $result=@{ok=$false;reason='stale-observation';routeScope='observation-identity';refresh='observe';attempted=$false;inputSent=$false;providerCalled=$false;note='观察身份已失效；fresh observe后仅执行原动作一次，不自动切后端或清暂停。'}
+  if($script:LastObservationInvalidation -and $script:LastObservationInvalidation.id -ceq $id -and $script:LastObservationInvalidation.reason -eq 'begin'){$result.observationInvalidatedBy='begin';$result.note='该观察ID已由begin清除；应先begin再fresh observe，不能复用begin前ID。'}
+  return $result
+}
+
 function Invoke-ObservedElement($req) {
   $observation = $script:CurrentObservation
   # Consume the observation before any side effect, including uncertain failures.
   $script:CurrentObservation = $null
   if ($null -eq $observation -or $observation.id -cne [string]$req.observationId -or $observation.hwnd -ne [long]$req.hwnd -or -not $observation.entries.ContainsKey([string]$req.elementId)) {
-    return @{ ok = $false; reason = 'stale-observation'; refresh = 'observe'; note = '观察ID/元素ID已失效或不属于目标窗口；fresh observe后仅重试原动作一次。' }
+    return Get-StaleObservationResult ([string]$req.observationId)
   }
   $entry = $observation.entries[[string]$req.elementId]
   try {
@@ -191,6 +240,7 @@ function Invoke-ObservedElement($req) {
     $focusBlock=Get-FocusPolicyBlock $req
     if($null -ne $focusBlock){return $focusBlock}
     if (-not $snapshot.enabled -or $snapshot.offscreen) { return @{ ok = $false; reason = 'element-unavailable' } }
+    if($req.mode -eq 'invoke'){return Invoke-ObservedInvoke $req $entry $snapshot $observation}
     if($req.mode -eq 'value'){return Invoke-ObservedValue $req $entry $snapshot $observation}
     if ($req.mode -ne 'uia') {
       $h=[IntPtr][long]$snapshot.nativeWindowHandle
@@ -199,7 +249,7 @@ function Invoke-ObservedElement($req) {
       $button=$snapshot.type -eq 'ControlType.Button' -and $snapshot.nativeClass -match '^(Button|WindowsForms10\.BUTTON\..+)$'
       $edit=$snapshot.type -eq 'ControlType.Edit' -and $snapshot.nativeClass -match '^(Edit|WindowsForms10\.EDIT\..+)$'
       if(-not $owned -or ([string]$req.cmd -eq 'click' -and -not $button) -or ([string]$req.cmd -eq 'type' -and -not $edit)) {
-        return @{ok=$false;reason='focus-preserving-unsupported';note='该元素无已核实标准native后台路径；未调用UIA副作用或坐标回退。仅允许目标激活时显式选择mode:uia。'}
+        return @{ok=$false;reason='focus-preserving-unsupported';routeScope='element-native';attempted=$false;inputSent=$false;providerCalled=$false;nativeOwnershipVerified=[bool]$owned;standardNativeClassVerified=[bool]$(if([string]$req.cmd -eq 'click'){$button}else{$edit});recoveryRoute='explicit-coordinate-message-after-fresh-visual-check';note='仅此元素的标准native消息语义路线不支持；未调用provider或坐标回退，不代表独立后端整体不可用。若实际图片已确认目标，可fresh观察后显式选择hwnd+坐标message；不自动切官方或请求焦点。'}
       }
       if([string]$req.cmd -eq 'click') {
         $n=1
@@ -259,10 +309,10 @@ function Get-InputObservationStatus([string]$id, [long]$hwnd) {
     $observation = $script:CurrentObservation
     if ($null -eq $observation -or $observation.id -cne $id -or $observation.hwnd -ne $hwnd -or -not [DshInput]::IsWindow([IntPtr]$hwnd) -or ($observation.root.GetRuntimeId() -join ',') -cne $observation.rootRuntimeId -or ([DshInput]::WindowRect([IntPtr]$hwnd) -join ',') -cne $observation.windowRect) {
       $script:CurrentObservation = $null
-      return @{ ok = $false; reason = 'stale-observation'; refresh = 'observe' }
+      return Get-StaleObservationResult $id
     }
     return @{ ok = $true; observationId = $id; hwnd = $hwnd }
-  } catch { $script:CurrentObservation = $null; return @{ ok = $false; reason = 'stale-observation'; refresh = 'observe' } }
+  } catch { $script:CurrentObservation = $null; return Get-StaleObservationResult $id }
 }
 
 # Update only the non-interactive header before a validated side effect. Failure
@@ -271,4 +321,25 @@ function Show-InputIndicator([int]$x, [int]$y) {
   [DshInput]::CheckNotPaused()
   if (-not [DshOverlay]::ShowIndicatorAt($x, $y)) { throw 'target-screen-indicator-failed: 未发送输入，屏幕提示未确认可见' }
   [DshInput]::CheckNotPaused()
+}
+
+# Transient scan: never registers/consumes CurrentObservation or its locators.
+function Get-CaptureAuthPrivacy([long]$hwnd) {
+  $title=[DshInput]::WindowTitle([IntPtr]$hwnd)
+  if((Protect-AuthUrlText $title) -cne $title){return @{checked=$true;sensitive=$true}}
+  if(-not $script:uia){return @{checked=$false;reason='uia-unavailable'}}
+  try {
+    $root=Get-ObservationRoot $hwnd
+    if($null -eq $root){return @{checked=$false;reason='uia-no-window'}}
+    $pending=New-Object 'System.Collections.Generic.Queue[object]';$pending.Enqueue($root);$count=0;$truncated=$false
+    while($pending.Count -gt 0 -and $count -lt 500){
+      $element=$pending.Dequeue();$count++
+      $snapshot=Get-ElementSnapshot $element
+      foreach($key in @('name','value','automationId')){if($null -ne $snapshot[$key] -and (Protect-AuthUrlText ([string]$snapshot[$key])) -cne [string]$snapshot[$key]){return @{checked=$true;sensitive=$true}}}
+      $child=Get-ObservationFirstChild $element
+      while($null -ne $child -and $pending.Count+$count -lt 500){$pending.Enqueue($child);$child=Get-ObservationNextSibling $child}
+      if($null -ne $child){$truncated=$true}
+    }
+    return @{checked=($pending.Count -eq 0 -and -not $truncated);sensitive=$false;reason=if($pending.Count -or $truncated){'uia-truncated'}else{'checked'}}
+  } catch {return @{checked=$false;reason='uia-unavailable'}}
 }

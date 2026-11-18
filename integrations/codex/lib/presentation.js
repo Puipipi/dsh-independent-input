@@ -1,3 +1,4 @@
+import {sanitizePublic} from './auth-privacy.js'
 import {compactStop} from './stop-info.js'
 // Public projections only. Full snapshots/signatures remain in the sidecar.
 const boundText = n => Number.isInteger(n) ? Math.max(1,Math.min(16384,n)) : 256
@@ -22,15 +23,15 @@ export function presentObservation(observed,{details=false,maxTextChars=256}={},
  result.elements=(observed.elements || []).map(e=>{
   const native=Boolean(e.nativeWindowHandle), backgroundActions=[]
   if(native&&e.enabled&&!e.offscreen){if(e.type==='ControlType.Button'&&/^(Button|WindowsForms10\.BUTTON\..+)$/i.test(e.nativeClass))backgroundActions.push('click');if(e.type==='ControlType.Edit'&&/^(Edit|WindowsForms10\.EDIT\..+)$/i.test(e.nativeClass)&&!e.password&&!e.nativePassword&&!e.nativeReadOnly&&!e.state?.readonly)backgroundActions.push('type')}
-  if(e.enabled&&!e.offscreen&&!e.password&&!e.nativePassword&&!e.nativeReadOnly&&!e.state?.readonly&&['ControlType.Edit','ControlType.ComboBox'].includes(e.type)&&e.patterns?.includes('Value'))backgroundActions.push('type:value')
-  const out=details ? {...e} : {elementId:e.elementId,parentId:e.parentId,type:e.type,rect:e.rect,enabled:e.enabled,offscreen:e.offscreen,password:e.password,readonly:Boolean(e.nativeReadOnly||e.state?.readonly),backgroundActions}
+  const valueWrite=e.enabled&&!e.offscreen&&!e.password&&!e.nativePassword&&!e.nativeReadOnly&&!e.state?.readonly&&['ControlType.Edit','ControlType.ComboBox'].includes(e.type)&&e.patterns?.includes('Value')?'foreground-root-under-preserve':undefined
+  const out=details ? {...e,valueWrite} : {elementId:e.elementId,parentId:e.parentId,type:e.type,rect:e.rect,enabled:e.enabled,offscreen:e.offscreen,password:e.password,readonly:Boolean(e.nativeReadOnly||e.state?.readonly),backgroundActions,valueWrite}
   field(out,'name',e.name,maxTextChars)
   if(e.value!==null&&e.value!==undefined)field(out,'value',e.value,maxTextChars)
   if(details){field(out,'automationId',e.automationId,maxTextChars);field(out,'nativeClass',e.nativeClass,maxTextChars)}
   return out
  })
  result.textLimit=maxTextChars;result.details=details
- return result
+ return sanitizePublic(result)
 }
 export function presentWindows(inventory,{title,className,pid,offset=0,limit=24,maxTextChars=256}={}) {
  maxTextChars=boundText(maxTextChars);limit=Number.isInteger(limit)?Math.max(1,Math.min(100,limit)):24;offset=Number.isInteger(offset)?Math.max(0,offset):0
@@ -41,7 +42,11 @@ export function presentWindows(inventory,{title,className,pid,offset=0,limit=24,
 export function presentControl(control,details=false){
  if(details||!control)return control
  const owner=control.owner,out={}
- for(const k of ['busy','scope','canAcquire','reason','pauseReason','externalOfficialState','leaseId','ownerExecutionId','ownerRootId','ownerName','ownerProjectId','ownerProjectName','ownerProjectPath','ownerProjectSource','reminderStatus','state','position','turn','queueVersion','waitResult'])if(control[k]!==undefined)out[k]=control[k]
+ for(const k of ['busy','scope','canAcquire','reason','pauseReason','externalOfficialState','leaseId','ownerExecutionId','ownerRootId','ownerName','ownerProjectId','ownerProjectName','ownerProjectPath','ownerProjectSource','reminderStatus','state','position','turn','queueVersion','waitResult','protocolVersion','coordinatorRuntimeVersion','capacity','occupied','availableSlots','desktopPaused','migrationState','observationError','recoveryRequired','observedDead','recoveryState'])if(control[k]!==undefined)out[k]=control[k]
+ if(control.owners)out.owners=control.owners.map(x=>Object.fromEntries(['executionId','rootId','name','projectId','projectName','projectSource','leaseId','paused','pauseReason','reminderStatus'].filter(k=>x[k]!==undefined).map(k=>[k,x[k]])))
+ if(control.stoppedExecutions?.length)out.stoppedExecutions=control.stoppedExecutions.map(x=>({...Object.fromEntries(['executionId','rootId','name','projectId','projectName','requiredAction'].filter(k=>x[k]!==undefined).map(k=>[k,x[k]])),...(x.lastStop?{lastStop:compactStop(x.lastStop)}:{})}))
+ if(control.controllerFault)out.controllerFault=compactStop(control.controllerFault)
+ if(control.sharedHeaders)out.sharedHeaders=control.sharedHeaders.map(x=>({monitor:x.monitor,visible:x.visible,renderSucceeded:x.renderSucceeded,sampledUtc:x.sampledUtc}))
  if(owner){Object.assign(out,{ownerExecutionId:owner.executionId,ownerRootId:owner.rootId,ownerName:owner.name,ownerProjectId:owner.projectId,ownerProjectName:owner.projectName,ownerProjectSource:owner.projectSource,leaseId:owner.leaseId,pauseReason:owner.pauseReason,reminderStatus:owner.reminderStatus})}
  for(const k of ['stopInfo','lastStop'])if(control[k]||owner?.[k])out[k]=compactStop(control[k]||owner[k])
  if(control.queue)out.queue=control.queue.map(t=>Object.fromEntries(['executionId','rootId','name','projectId','projectName','projectSource','position','sequence','actorState'].filter(k=>t[k]!==undefined).map(k=>[k,t[k]])))

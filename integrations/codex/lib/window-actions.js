@@ -32,7 +32,8 @@ export async function openOnMonitor(engine, path, preference, {wait=ms=>new Prom
  const area=resolved.monitor.workArea
  let launch
  try { launch=await engine.request('shellOpen',{path,x:Math.round(area.x+area.width/2),y:Math.round(area.y+area.height/2)},15000) }
- catch(error) { return {...base,ok:false,opened:null,launchAttempted:true,reason:'open-result-unknown',error:String(error.message || error),note:'原子启动请求结果不确定，可能已经启动；先观察，禁止自动重试open。'} }
+ catch(error) { return {...base,ok:false,opened:error.launchStarted===false?false:null,launchAttempted:error.launchStarted===false?false:true,reason:error.launchStarted===false?'open-preparation-incomplete':'open-result-unknown',...(error.launchPreparation?{launchPreparation:error.launchPreparation}:{}),error:String(error.message || error),note:'不得自动重试open；准备阶段失败尚未交给启动helper，其他未知结果可能已经启动。先核原请求。'} }
+ if(launch.launchTicket)return {...base,...launch,ok:['pending','accepted'].includes(launch.launchState),placementConfirmed:false,reason:launch.reason||('launch-'+launch.launchState),note:'单次启动票据；pending/unknown不等于未启动，不自动重试。可继续同执行器observe处理已授权提示，再open_status查询；接受不等于健康。窗口出现后fresh核对并显式place。'}
  launch.launchAttempted=launch.opened===true
  let stage='post-launch-status'
  try {

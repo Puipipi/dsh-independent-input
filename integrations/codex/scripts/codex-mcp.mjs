@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {sanitizePublic} from '../lib/auth-privacy.js'
 // MCP stdio transport: one JSON-RPC message per line. stdout is protocol only.
 import { createInterface } from 'node:readline'
 import { homedir } from 'node:os'
@@ -16,14 +17,14 @@ const dispose = await apply({
   logger: { info: log, warn: log },
 }, {}, { defineTool: value => value, settingsFile: join(dataDir, 'settings.json'), shotsDir: join(dataDir, 'shots') })
 
-const actions = ['control_request','control_wait','control_cancel','status', 'windows', 'observe', 'capture', 'click', 'type', 'key', 'scroll', 'drag', 'bounds', 'place', 'open', 'move', 'begin', 'finish', 'pause', 'resume', 'overlay']
-const inputActions = ['click', 'type', 'key', 'scroll', 'drag', 'bounds', 'place', 'open']
+const actions = ['control_request','control_wait','control_cancel','status', 'windows', 'observe', 'capture', 'click', 'type', 'key', 'scroll', 'drag', 'bounds', 'place', 'reveal', 'open', 'open_status', 'move', 'begin', 'finish', 'pause', 'resume', 'overlay']
+const inputActions = ['click', 'type', 'key', 'scroll', 'drag', 'bounds', 'place', 'reveal', 'open']
 const properties = Object.fromEntries(Object.entries(tool.parameters).map(([key, value]) => {
   const { required, ...schema } = value
   return [key, schema]
 }))
 properties.action.enum = actions
-properties.mode.enum = ['auto', 'uia', 'message', 'value']
+properties.mode.enum = ['auto', 'uia', 'message', 'value', 'invoke']
 properties.cursorMode.enum = ['companion', 'clean']
 properties.button.enum = ['left', 'right']
 properties.hwnd.type = 'integer'
@@ -33,7 +34,7 @@ properties.hwnd.description = '本工具 windows 返回的原生 HWND；输入�
 properties.path.description = 'open:要打开的本地绝对文件/文件夹/明确exe；capture:保存PNG绝对路径，可省略。open只发一次系统请求，不自动重试或移动共享实例旧窗。'
 const definition = {
   name: tool.name,
-  description: '控制权busy用control_request/control_wait/control_cancel排队；wait≤45秒，到期保持原执行器active并立即续wait，同票FIFO；ready后fresh观察再begin，无旧输入重放。主会话有独立工作时同一原CU子代理等待并用父子通道通知，不新建chat/后台模型。Stop/host end撤票，不自动续。仅新协议实例保证公平，官方状态unknown。Windows桌面默认独立输入后端。windows选择唯一hwnd，observe返回新鲜observationId/elementId及UIA树（includeScreenshot可选），click/type优先用本次两ID+hwnd，一个动作后重新observe；stale要求fresh observe后仅一次原动作，普通状态变化不是硬stop。兼容hwnd+屏幕绝对物理像素；不要传sky/cua opaque ID、逻辑坐标或截图ID。UIA/offscreen=false仅provider报告，不保证屏幕可见。includeScreenshot实际附图后先看图核对场景/目标；mappingVerified/occlusionSafe不验证业务fresh。无图不作视觉验收；画面与UIA不符仅只读fresh核对，报告观察不一致，不判点击无效或盲重试/改焦点/搬窗。capture报告方法/原点/尺寸/遮挡限制。auto/message仅走目标native窗口消息；元素ID仅支持已核标准Button/Edit，未知不回退provider。type mode:value仅fresh元素双ID+hwnd、无坐标，对可写Edit/ComboBox窄ValuePattern.SetValue+回读，不主动请求焦点但provider可能激活，不能保证DOM/input/change/React状态。type无坐标保留显式child；key x/y成对时选child，否则直投hwnd。显式uia调用provider可能SetFocus/激活，仅获允许时选择。不调用真实输入/官方CU，不自动fallback原生CU。begin不清暂停；finish隐藏overlay并锁住后续输入直到begin。active时物理Ctrl+Esc或pause锁暂停，普通键鼠不结束；用户明确继续才resume。宿主stop/end/拒绝仍立即停止，不可绕过。',
+  description: '先看status.control；仅容量/FIFO阻塞用control_request/control_wait/control_cancel排队，pause/resume-required等用户明确继续，不当排队；wait≤45秒，到期保持原执行器active并立即续wait，同票FIFO；ready后先begin再fresh观察，无旧输入重放。主会话有独立工作时同一原CU子代理等待并用父子通道通知，不新建chat/后台模型。Stop/host end撤票，不自动续。仅新协议实例保证公平，官方状态unknown。Windows桌面默认独立输入后端。windows选择唯一hwnd，observe返回新鲜observationId/elementId及UIA树（includeScreenshot可选），click/type优先用本次两ID+hwnd，一个动作后重新observe；stale要求fresh observe后仅一次原动作，普通状态变化不是硬stop。兼容hwnd+屏幕绝对物理像素；不要传sky/cua opaque ID、逻辑坐标或截图ID。UIA/offscreen=false仅provider报告，不保证屏幕可见。includeScreenshot实际附图后先看图核对场景/目标；mappingVerified/occlusionSafe不验证业务fresh。无图不作视觉验收；画面与UIA不符仅只读fresh核对，报告观察不一致，不判点击无效或盲重试/改焦点/搬窗。capture报告方法/原点/尺寸/遮挡限制。auto/message仅走目标native窗口消息；元素ID仅支持已核标准Button/Edit，未知仅该语义route受限、不回退provider；fresh图核后可显式坐标message。最多三个独立execution指针并行，同root预约排他、第四FIFO；每屏共享一个header。type mode:value在preserve下仅目标当前系统前台根允许，外国前台拒绝provider写入，后台用fresh消息路径；仅fresh元素双ID+hwnd、无坐标，对可写Edit/ComboBox窄ValuePattern.SetValue+回读，不主动请求焦点但provider可能激活，不能保证DOM/input/change/React状态。type无坐标保留显式child；key x/y成对时选child，否则直投hwnd。显式uia调用provider可能SetFocus/激活，仅获允许时选择。reveal仅显式对授权可见非最小化顶层窗提普通Z序，NOACTIVATE/不移缩/不永久置顶，可能覆盖同屏其它窗；不自动用于独占游戏屏，后fresh观察，不保证全程前台。bounds/place仍NOZORDER。不调用真实输入/官方CU，不自动fallback原生CU。begin清观察但不清暂停，先begin再observe；finish只结束输入会话，yieldSeconds是资源让出提示、不暂停根任务，后续须begin。active时物理Ctrl+Esc或pause锁暂停，普通键鼠不结束；用户明确继续才resume。宿主stop/end/拒绝仍立即停止，不可绕过。',
   inputSchema: { type: 'object', properties, required: ['action'], additionalProperties: false },
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
 }
@@ -73,7 +74,7 @@ async function handle(message, requestOptions={}) {
   switch (message.method) {
     case 'initialize': return {
       protocolVersion: versions.includes(message.params?.protocolVersion) ? message.params.protocolVersion : versions[0],
-      capabilities: { tools: {} }, serverInfo: { name: 'dsh-independent-input', version: '0.6.2' },
+      capabilities: { tools: {} }, serverInfo: { name: 'dsh-independent-input', version: '0.7.6' },
     }
     case 'ping': return {}
     case 'tools/list': return { tools: [definition] }
@@ -98,7 +99,7 @@ async function handle(message, requestOptions={}) {
 }
 
 let closed = false
-const send = value => new Promise(resolve=>{if(closed){resolve(false);return}process.stdout.write(`${JSON.stringify(value)}\n`,error=>resolve(!error))})
+const send = value => new Promise(resolve=>{if(closed){resolve(false);return}process.stdout.write(`${JSON.stringify(sanitizePublic(value))}\n`,error=>resolve(!error))})
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity })
 const requests = new Map()
 let queue = Promise.resolve(), active = null

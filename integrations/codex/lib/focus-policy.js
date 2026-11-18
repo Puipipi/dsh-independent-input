@@ -1,6 +1,6 @@
 export function normalizeFocusPolicy(value) { return value === 'allow-activation' ? 'allow-activation' : 'preserve' }
 export function focusPolicyBlock(action, args, policy) {
- const input=['click','type','key','scroll','drag','move','bounds','place','open','overlay'].includes(action) && !(action==='overlay' && args.show===false)
+ const input=['click','type','key','scroll','drag','move','bounds','place','reveal','open','overlay'].includes(action) && !(action==='overlay' && args.show===false)
  if(input && String(args.mode || '').toLowerCase()==='uia' && normalizeFocusPolicy(policy)!=='allow-activation') return {ok:false,reason:'focus-policy-preserve',focusPolicy:'preserve',inputSent:false,providerCalled:false,note:'保焦点策略已拒绝UIA provider输入；未调用provider、未发送输入。只读observe仍可用；使用受支持的auto/message后台路径，不支持则报告限制。'}
  return null
 }

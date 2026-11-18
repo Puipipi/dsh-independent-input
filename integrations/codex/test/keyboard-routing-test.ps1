@@ -31,10 +31,10 @@ $r=Invoke-Request @{cmd='key';hwnd=100;windowObservationId='fresh';keys='enter';
 if(-not $r.ok -or $r.hwnd -ne 200 -or $r.target -ne 100 -or ([DshInput]::Recipients -join ',') -ne '200,200'){throw 'key coordinate route not sent to actual child'}
 [DshInput]::Recipients.Clear();$script:CurrentObservation=@{hwnd=300}
 $r=Invoke-Request @{cmd='key';hwnd=300;windowObservationId='fresh';keys='enter';mode='message'}
-if(-not $r.ok -or $r.hwnd -ne 300 -or $script:GuardHwnd -ne 300 -or ([DshInput]::Recipients -join ',') -ne '300,300'){throw 'existing explicit child key route changed'}
+if($r.reason -ne 'root-window-observation-required' -or [DshInput]::Recipients.Count){throw 'child observation accepted instead of requiring root observation'}
 [DshInput]::Recipients.Clear();$r=Invoke-Request @{cmd='key';hwnd=100;keys='enter';x=20;mode='message'}
 if($r.ok -ne $false -or [DshInput]::Recipients.Count){throw 'partial key coordinate sent input'}
 $script:CurrentObservation=@{hwnd=100};[DshInput]::NativeEdit=$true
 $r=Invoke-Request @{cmd='type';hwnd=300;windowObservationId='fresh';text='native-value';replace=$true;mode='auto'}
 if(-not $r.verified -or $r.hwnd -ne 300 -or [DshInput]::Writes -ne 1 -or [DshInput]::Text -cne 'native-value'){throw 'standard native Edit setter/readback regressed'}
-'PASS actual dispatcher: explicit child type preserved; root/child guards; coordinate key child recipient and direct-child compatibility; partial pair refused; native Edit one-write exact readback; no global focus lookup'
+'PASS actual dispatcher: explicit child recipient preserved with root observation; child observation refused; coordinate key child recipient; partial pair refused; native Edit one-write exact readback; no global focus lookup'

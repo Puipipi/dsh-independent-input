@@ -27,3 +27,7 @@ assert.equal(r.actualMonitor,'SIDE');assert.equal(r.placementConfirmed,false,'ce
 e=fixture({returnedBounds:{x:0,y:0,width:800,height:600}});r=await placeWindow(e,123,'secondary');assert.equal(r.wasMoved,false,'SetWindowPos success is not actual motion')
 e=fixture({failAfterLaunch:true});r=await openOnMonitor(e,'C:\\fixture.txt','secondary',{wait:async()=>{}});assert.equal(r.opened,true);assert.equal(r.launchAttempted,true);assert.equal(r.placementConfirmed,false);assert.equal(r.failedStage,'post-launch-status');assert.equal(e.calls.filter(x=>x.cmd==='shellOpen').length,1)
 console.log('PASS: full actual outer-rect containment, actual movement comparison, and post-launch failure preserves opened=true/no retry')
+e=fixture();const originalRequest=e.request;e.request=async(cmd,args)=>cmd==='shellOpen'?(e.calls.push({cmd,args}),{ok:true,opened:null,launchTicket:'owned-pending',launchState:'pending'}):originalRequest(cmd,args)
+r=await openOnMonitor(e,'C:\\fixture.txt','secondary',{wait:async()=>{throw new Error('pending must not poll/block input queue')}})
+assert.equal(r.launchState,'pending');assert.equal(r.opened,null);assert.equal(r.ok,true);assert.equal(e.calls.filter(x=>x.cmd==='shellOpen').length,1);assert(!e.calls.some(x=>x.cmd==='bounds'))
+console.log('PASS async pending launch is one request, no automatic discovery/move/retry; caller retains lane for observe/dialog action')

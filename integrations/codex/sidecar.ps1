@@ -3,6 +3,8 @@
 # 设计目标：默认不碰主人的真实光标和键盘焦点（UIA / 窗口消息），
 # 物理输入只作为显式回退，并且主人一碰鼠标键盘就立刻暂停、还原光标。
 
+. (Join-Path $PSScriptRoot 'lib/executor-bootstrap.ps1')
+Wait-ExecutorPermit
 $ErrorActionPreference = 'Stop'
 try {
   [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -19,7 +21,7 @@ if ($env:DSH_INPUT_CURSOR_HOLD_MS) {
   try { $script:cursorHoldMs = [int]$env:DSH_INPUT_CURSOR_HOLD_MS } catch { }
 }
 # AI 光标大小：0跟随目标屏Windows光标尺寸，24–192手动覆盖。
-# Sprite atlases are scaled once at their configured cell size; upstream defaults remain 64px.
+# GPT娘素材保留原256px帧，仅在最终显示尺寸做一次高质量缩放。
 $script:cursorSize = 0
 if ($env:DSH_INPUT_CURSOR_SIZE) {
   try { $script:cursorSize = [int]$env:DSH_INPUT_CURSOR_SIZE } catch { }
@@ -507,7 +509,34 @@ public static class DshInput
         stopOwnerName=owner.TryGetValue("name",out v)&&v!=null?Convert.ToString(v):"会话名称暂不可用";
     }
     public static void RestoreStop(string json) {if(string.IsNullOrEmpty(json))return;StopInfo=new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<Dictionary<string,object>>(json);LastStop=StopInfo;}
-    static string StopSource(string reason) {return reason.StartsWith("backend-timeout")?"backend-timeout":reason.StartsWith("backend-")?reason.Split(':')[0]:reason=="transport-eof"?"transport-eof":reason=="host-cancel"?"host-cancel":reason=="api"?"manual-tool":reason=="hotkey"?"keyboard-hotkey":"host-interrupt";}
+    static Thread sharedPauseThread;static EventWaitHandle sharedPauseEvent;static volatile bool stopSharedPause;
+    public static void StartSharedPause() {
+        string name=Environment.GetEnvironmentVariable("DSH_INPUT_PAUSE_EVENT"),path=Environment.GetEnvironmentVariable("DSH_INPUT_SHARED_STOP_FILE"),execution=Environment.GetEnvironmentVariable("DSH_INPUT_EXECUTION_ID");
+        if(string.IsNullOrEmpty(name)||string.IsNullOrEmpty(path)||string.IsNullOrEmpty(execution)||sharedPauseThread!=null)return;
+        sharedPauseEvent=new EventWaitHandle(false,EventResetMode.AutoReset,name);stopSharedPause=false;
+        sharedPauseThread=new Thread(delegate(){bool signaled=false;
+            while(!stopSharedPause){
+                bool recognized=false,readFailed=false;
+                try {
+                    var json=new System.Web.Script.Serialization.JavaScriptSerializer();var state=json.Deserialize<Dictionary<string,object>>(System.IO.File.ReadAllText(path));
+                    object list;if(state.TryGetValue("lanes",out list))foreach(object item in (System.Collections.IEnumerable)list){var lane=(Dictionary<string,object>)item;
+                        if(Convert.ToString(lane["executionId"])!=execution)continue;
+                        object value;Dictionary<string,object> info=null;
+                        // A newly rebuilt executor is awaiting its own explicit resume.
+                        // A new desktop stop clears resuming and must still win.
+                        if(lane.TryGetValue("resuming",out value)&&Convert.ToBoolean(value))continue;
+                        if(Convert.ToBoolean(lane["paused"]))info=lane["stopInfo"] as Dictionary<string,object>;
+                        else if(lane.TryGetValue("controllerFault",out value))info=value as Dictionary<string,object>;
+                        if(info!=null&&info.ContainsKey("reason")&&info.ContainsKey("source")){recognized=true;if(!Paused){RecordStop(Convert.ToString(info["reason"]),Convert.ToString(info["source"]),null);RestoreStop(json.Serialize(info));EmitPauseState();ReleaseAll();DshOverlay.SetPaused(true);}}
+                    }
+                }catch{readFailed=true;}
+                if((readFailed||signaled&&!recognized)&&!Paused){RecordStop("backend-control-state-unavailable","backend-control-state-unavailable",null);EmitPauseState();ReleaseAll();DshOverlay.SetPaused(true);}
+                sharedPauseEvent.WaitOne();
+                signaled=true;
+            }
+        });sharedPauseThread.IsBackground=true;sharedPauseThread.Start();
+    }
+    static string StopSource(string reason) {return reason.StartsWith("backend-timeout")?"backend-timeout":reason.StartsWith("backend-")?reason.Split(':')[0]:reason=="transport-eof"?"transport-eof":reason=="host-cancel"?"host-cancel":reason=="permission-refusal"?"permission-refusal":reason=="api"?"manual-tool":reason=="hotkey"?"keyboard-hotkey":"host-interrupt";}
     public static bool RecordStop(string reason,string source,Dictionary<string,object> keyboard) {
         lock(stopSync) {
             if(Paused)return false;
@@ -550,6 +579,8 @@ public static class DshInput
 
     public static void StartHotkey()
     {
+        if(Environment.GetEnvironmentVariable("DSH_INPUT_READONLY")=="1") return;
+        if(Environment.GetEnvironmentVariable("DSH_INPUT_EXTERNAL_HEADERS")=="1") return;
         if (hotkeyThread != null) return;
         hotkeyThread = new Thread(HotkeyThreadProc);
         hotkeyThread.IsBackground = true;
@@ -596,6 +627,8 @@ public static class DshInput
 
     public static void StartHooks()
     {
+        if(Environment.GetEnvironmentVariable("DSH_INPUT_READONLY")=="1") return;
+        if(Environment.GetEnvironmentVariable("DSH_INPUT_EXTERNAL_HEADERS")=="1") return;
         if (hookThread != null) return;
         hookThread = new Thread(HookThreadProc);
         hookThread.IsBackground = true;
@@ -974,6 +1007,11 @@ public static class DshInput
         GetClassNameW(hwnd, sb, sb.Capacity);
         return sb.ToString();
     }
+    public static bool RevealWindow(IntPtr hwnd)
+    {
+        CheckNotPaused();
+        return SetWindowPos(hwnd,IntPtr.Zero,0,0,0,0,0x0213);
+    }
 
     [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] public struct SHELLEXECUTEINFO {
         public int cbSize; public uint fMask; public IntPtr hwnd; public string lpVerb,lpFile,lpParameters,lpDirectory; public int nShow; public IntPtr hInstApp,lpIDList; public string lpClass; public IntPtr hkeyClass; public uint dwHotKey; public IntPtr hMonitor,hProcess;
@@ -1082,14 +1120,20 @@ public static class DshInput
         CheckNotPaused();
     }
 
+    public static int KeyMessageLParam(int vk,uint scanEx,bool down,bool extended)
+    {
+        int lParam=1|((int)(scanEx&0xff)<<16);
+        // Main navigation VKs remain extended even when the layout maps them
+        // to the same low scan byte as their numeric-keypad counterparts.
+        bool navigation=(vk>=0x21&&vk<=0x28)||vk==0x2d||vk==0x2e;
+        if(extended||navigation||(scanEx&0xff00)==0xe000)lParam|=1<<24;
+        if(!down)lParam|=unchecked((int)0xc0000000);
+        return lParam;
+    }
     public static void PostKey(IntPtr hwnd, int vk, bool down, bool extended, bool sys)
     {
         if (down) CheckNotPaused();
-        int scan = (int)MapVirtualKey((uint)vk, 0);
-        int lParam = 1 | (scan << 16);
-        if (extended) lParam |= (1 << 24);
-        if (!down) lParam |= (1 << 30);
-        if (!down) lParam |= unchecked((int)(1u << 31));
+        int lParam = KeyMessageLParam(vk,MapVirtualKey((uint)vk,4),down,extended);
         uint msg = down ? (sys ? (uint)WM_SYSKEYDOWN : (uint)WM_KEYDOWN) : (sys ? (uint)WM_SYSKEYUP : (uint)WM_KEYUP);
         if (!PostMessage(hwnd, msg, new IntPtr(vk), new IntPtr(lParam))) throw new Exception("PostMessage key failed");
     }
@@ -1197,6 +1241,59 @@ public static class DshOverlay
     static Thread thread = null;
     static OverlayForm form = null;
     static ScreenHeader header = null;
+    static readonly Dictionary<string,ScreenHeader> sharedHeaders=new Dictionary<string,ScreenHeader>(StringComparer.OrdinalIgnoreCase);
+    static bool ExternalHeaders { get { return Environment.GetEnvironmentVariable("DSH_INPUT_EXTERNAL_HEADERS")=="1"; } }
+    static bool SharedHeaderAt(int x,int y,bool clear=false) {
+        try {
+            string endpoint=Environment.GetEnvironmentVariable("DSH_INPUT_COORDINATOR_PIPE"), execution=Environment.GetEnvironmentVariable("DSH_INPUT_EXECUTION_ID");
+            const string prefix="\\\\.\\pipe\\";
+            if(string.IsNullOrEmpty(endpoint)||!endpoint.StartsWith(prefix)||string.IsNullOrEmpty(execution)) return false;
+            var json=new System.Web.Script.Serialization.JavaScriptSerializer();
+            using(var pipe=new System.IO.Pipes.NamedPipeClientStream(".",endpoint.Substring(prefix.Length),System.IO.Pipes.PipeDirection.InOut,System.IO.Pipes.PipeOptions.Asynchronous)) {
+                pipe.Connect(900);
+                using(var writer=new System.IO.StreamWriter(pipe,new System.Text.UTF8Encoding(false),1024,true)) using(var reader=new System.IO.StreamReader(pipe,System.Text.Encoding.UTF8,false,1024,true)) {
+                    writer.WriteLine(json.Serialize(new {op="monitor",clientRuntimeVersion=Environment.GetEnvironmentVariable("DSH_INPUT_RUNTIME_VERSION"),identity=new {executionId=execution},device=clear?null:DshInput.MonitorAtPoint(x,y).DeviceName,x=x,y=y}));writer.Flush();
+                    var pending=reader.ReadLineAsync();if(!pending.Wait(1200)||pending.Result==null)return false;
+                    var result=json.Deserialize<Dictionary<string,object>>(pending.Result);return result.ContainsKey("ok")&&Convert.ToBoolean(result["ok"]);
+                }
+            }
+        }catch{return false;}
+    }
+    public sealed class SharedHeaderRow {
+        public DshInput.MonitorSnapshot Screen;public int X,Y;public bool Paused,Notice;public string Indicator;
+        public int Priority {get{return !Paused?3:Notice?0:Indicator=="user-stopped"?2:1;}}
+    }
+    public static SharedHeaderRow[] NormalizeSharedHeaderRows(object[] records,Func<int,int,DshInput.MonitorSnapshot> resolve) {
+        var merged=new Dictionary<string,SharedHeaderRow>(StringComparer.OrdinalIgnoreCase);
+        foreach(object value in records){var row=(Dictionary<string,object>)value;int x=Convert.ToInt32(row["x"]),y=Convert.ToInt32(row["y"]);bool paused=Convert.ToBoolean(row["paused"]);var actual=resolve(x,y);SharedHeaderRow item;
+            object indicator,notice;
+            row.TryGetValue("indicator",out indicator);row.TryGetValue("notice",out notice);
+            var candidate=new SharedHeaderRow {Screen=actual,X=x,Y=y,Paused=paused,Notice=Convert.ToBoolean(notice),Indicator=indicator as string};
+            if(!merged.TryGetValue(actual.DeviceName,out item)||candidate.Priority>item.Priority)merged[actual.DeviceName]=candidate;
+        }
+        return new List<SharedHeaderRow>(merged.Values).ToArray();
+    }
+    public static bool ApplySharedHeaders(string jsonText) {
+        var records=NormalizeSharedHeaderRows(new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<object[]>(jsonText),delegate(int x,int y){return DshInput.MonitorAtPoint(x,y);});
+        bool active=false;foreach(var row in records)if(!row.Paused)active=true;
+        if(active&&DshInput.Paused)DshInput.Resume();
+        Start();
+        bool rendered=true;bool ran=Run(delegate {
+            var wanted=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach(var row in records){string device=row.Screen.DeviceName;wanted.Add(device);ScreenHeader item;
+                if(!sharedHeaders.TryGetValue(device,out item)){item=new ScreenHeader();sharedHeaders[device]=item;}
+                item.DisplayOnMonitor(row.X,row.Y,row.Paused,row.Screen,row.Indicator,row.Notice);
+                if(!item.Visible||!item.RenderSucceeded||item.MonitorDevice!=device)rendered=false;
+            }
+            foreach(var pair in sharedHeaders)if(!wanted.Contains(pair.Key))pair.Value.Hide();
+        },1200);
+        return ran&&rendered;
+    }
+    public static object[] SharedHeaderDiagnostics() {
+        if(form==null)return new object[0];var result=new List<object>();
+        Run(delegate {foreach(var pair in sharedHeaders)result.Add(new {monitor=pair.Key,visible=pair.Value.Visible,hwnd=pair.Value.IsHandleCreated?pair.Value.Handle.ToInt64():0,text=pair.Value.Text,rect=new int[]{pair.Value.Left,pair.Value.Top,pair.Value.Width,pair.Value.Height},renderSucceeded=pair.Value.RenderSucceeded,sampledUtc=DateTime.UtcNow.ToString("o")});},400);
+        return result.ToArray();
+    }
     static ManualResetEvent ready = new ManualResetEvent(false);
     static bool pausedState = false;
     static readonly Dictionary<string, Image> styleImages = new Dictionary<string, Image>(StringComparer.OrdinalIgnoreCase);
@@ -1209,7 +1306,9 @@ public static class DshOverlay
     public static int LastY = 0;
     public static bool HasLast = false;
     public static bool HasSessionTarget = false;
-    public static void ResetSessionTarget() { HasSessionTarget=false; if(form != null) Run(delegate() { header.Hide(); },400); }
+    public static void ResetSessionTarget() { ResetSessionTarget(true); }
+    public static void ResetSessionTarget(bool releaseShared) { HasSessionTarget=false; if(ExternalHeaders&&releaseShared)SharedHeaderAt(0,0,true); if(form != null) Run(delegate() { header.Hide(); },400); }
+    public static bool ReleaseSharedHeader() {return !ExternalHeaders||SharedHeaderAt(0,0,true);}
     static string cursorStyle = "pointer";
     static string cursorMode = "companion";
     static int cursorHoldMs = 2600;
@@ -1348,6 +1447,7 @@ public static class DshOverlay
     {
         if (!DshInput.SessionActive || DshInput.Paused) return false;
         LastX=x; LastY=y; HasLast=true; HasSessionTarget=true;
+        if(ExternalHeaders)return SharedHeaderAt(x,y)&&!DshInput.Paused;
         Start();
         bool prepared=Run(delegate() { if (DshInput.SessionActive && !DshInput.Paused) header.DisplayAt(x,y,false); }, 900);
         return prepared && header != null && header.Visible && HeaderRenderSucceeded() && !DshInput.Paused;
@@ -1366,7 +1466,8 @@ public static class DshOverlay
         HasLast = true;
         HasSessionTarget = true;
         Start();
-        Run(delegate() { form.ApplyMode(cursorMode,cursorHoldMs); form.DisplayPreparedAt(x,y,cursorSize==0 ? DshInput.AutoDisplaySizeAt(x,y) : cursorSize,cursorStyle); LastShowSucceeded=form.Visible && LastSetWindowPosOk; if (DshInput.SessionActive) header.DisplayAt(x, y, pausedState); }, 900);
+        if(ExternalHeaders&&!SharedHeaderAt(x,y))return;
+        Run(delegate() { form.ApplyMode(cursorMode,cursorHoldMs); form.DisplayPreparedAt(x,y,cursorSize==0 ? DshInput.AutoDisplaySizeAt(x,y) : cursorSize,cursorStyle); LastShowSucceeded=form.Visible && LastSetWindowPosOk; if (DshInput.SessionActive&&!ExternalHeaders) header.DisplayAt(x, y, pausedState); }, 900);
     }
 
     public static void SetMode(string mode, int holdMs)
@@ -1439,6 +1540,13 @@ public static class DshOverlay
         return new int[] { x + (width - w) / 2, y + gap, w, h };
     }
     public static string HeaderText(bool paused) { return paused ? "AI 已暂停操作此屏幕" : "AI 正在操作此屏幕"; }
+    public static string HeaderText(bool paused,string indicator) {
+        if(!paused)return HeaderText(false);
+        if(indicator=="finished")return "AI 已结束操控";
+        if(indicator=="yielded")return "AI 已暂时让出操控";
+        if(indicator=="user-stopped")return "用户已停止 AI 操控";
+        return HeaderText(true);
+    }
     public static int[] HeaderBounds() { if (header == null) return new int[] {0,0,0,0}; return new int[] {header.Left,header.Top,header.Width,header.Height}; }
     public static long HeaderHandle() { return header == null ? 0 : header.Handle.ToInt64(); }
     public static string HeaderMonitor() { return header == null ? "" : header.MonitorDevice; }
@@ -1479,18 +1587,25 @@ public static class DshOverlay
     }
     public static Bitmap DrawHeaderBitmap(int width,int height,int dpi,bool paused,bool hover)
     {
+        return DrawHeaderBitmap(width,height,dpi,paused,hover,null,false);
+    }
+    public static Bitmap DrawHeaderBitmap(int width,int height,int dpi,bool paused,bool hover,string indicator,bool notice)
+    {
         var bitmap=new Bitmap(width,height,PixelFormat.Format32bppPArgb);
         float scale=dpi/96f, grip=Math.Max(12,16*scale);
         using(var g=Graphics.FromImage(bitmap)) {
             // Restore the original nearly-solid rectangular purple header.
-            g.Clear(paused ? Color.FromArgb(240,103,66,20) : Color.FromArgb(240,38,32,61));
+            Color background=paused ? Color.FromArgb(240,103,66,20) : Color.FromArgb(240,38,32,61);
+            if(paused&&(indicator=="finished"||indicator=="yielded"))background=Color.FromArgb(240,23,78,73);
+            if(paused&&indicator=="user-stopped")background=Color.FromArgb(240,112,40,45);
+            g.Clear(background);
             g.TextRenderingHint=System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
             using(var font=new Font("Microsoft YaHei UI",(float)Math.Max(9,Math.Min(18,height*96.0/dpi*.34))*dpi/72f,FontStyle.Bold,GraphicsUnit.Pixel))
             using(var format=new StringFormat { Alignment=StringAlignment.Center,LineAlignment=StringAlignment.Center,Trimming=StringTrimming.EllipsisCharacter,FormatFlags=StringFormatFlags.NoWrap })
             using(var ink=new SolidBrush(Color.White)) {
-                g.DrawString(HeaderText(paused),font,ink,new RectangleF(grip,0,Math.Max(1,width-grip*2),height),format);
+                g.DrawString(HeaderText(paused,indicator),font,ink,new RectangleF(grip,0,Math.Max(1,width-grip*2),height),format);
             }
-            using(var ink=new SolidBrush(Color.FromArgb(255,180,160,220))) {
+            if(!notice)using(var ink=new SolidBrush(Color.FromArgb(255,180,160,220))) {
                 g.FillRectangle(ink,3*scale,height/2f-5*scale,Math.Max(3,grip-6*scale),10*scale);
                 g.FillPolygon(ink,new PointF[]{new PointF(width-3*scale,height-3*scale),new PointF(width-grip,height-3*scale),new PointF(width-3*scale,height-grip)});
             }
@@ -1514,13 +1629,13 @@ public static class DshOverlay
     {
         protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); DshInput.MarkFeedback(Handle); }
 
-        bool hover=false,rendering=false;
+        bool hover=false,rendering=false,screenPaused=false,screenNotice=false;int screenX,screenY;string screenIndicator;
         public bool RenderSucceeded=false; public int RenderError=0;
         public string MonitorDevice { get { return device; } }
         bool dragging=false,resizing=false; Point start; Rectangle initial,work; string device=""; int dpi=96;
         string SettingsPath { get { return Environment.GetEnvironmentVariable("DSH_INPUT_SETTINGS_FILE"); } }
         protected override bool ShowWithoutActivation { get { return true; } }
-        protected override CreateParams CreateParams { get { var cp=base.CreateParams; cp.ExStyle|=0x08000000|0x00080000|0x00000080; return cp; } }
+        protected override CreateParams CreateParams { get { var cp=base.CreateParams; cp.ExStyle|=0x08000000|0x00080000|0x00000080; if(screenNotice)cp.ExStyle|=0x20;return cp; } }
         public ScreenHeader()
         {
             Text="Independent Input Screen Status";
@@ -1528,7 +1643,7 @@ public static class DshOverlay
             BackColor=Color.Black;
             SetStyle(ControlStyles.AllPaintingInWmPaint|ControlStyles.UserPaint|ControlStyles.OptimizedDoubleBuffer,true);
             var menu=new ContextMenuStrip(); menu.Items.Add("设置宽高…",null,delegate { CustomizeSize(); });
-            menu.Items.Add("重置本屏",null,delegate { try { SaveHeaderSetting(SettingsPath,device,null); DisplayAt(LastX,LastY,pausedState); } catch(Exception e) { MessageBox.Show(e.Message,"保存失败"); } });
+            menu.Items.Add("重置本屏",null,delegate { try { SaveHeaderSetting(SettingsPath,device,null); DisplayOnMonitor(screenX,screenY,screenPaused,DshInput.MonitorAtPoint(screenX,screenY),screenIndicator,screenNotice); } catch(Exception e) { MessageBox.Show(e.Message,"保存失败"); } });
             ContextMenuStrip=menu;
             AccessibleName="屏幕操作提示";
             AccessibleDescription="拖动面板；右下角调整大小；右键设置宽高或重置本屏。";
@@ -1537,13 +1652,20 @@ public static class DshOverlay
         int Grip { get { return Math.Max(12,(int)Math.Round(16.0*dpi/96)); } }
         public void DisplayAt(int x,int y,bool paused)
         {
-            var screen=DshInput.MonitorAtPoint(x,y);
+            DisplayOnMonitor(x,y,paused,DshInput.MonitorAtPoint(x,y));
+        }
+        public void DisplayOnMonitor(int x,int y,bool paused,DshInput.MonitorSnapshot screen,string indicator=null,bool notice=false)
+        {
+            if(screenPaused!=paused||screenIndicator!=indicator||screenNotice!=notice)CancelInteraction();
+            if(screenNotice!=notice){screenNotice=notice;UpdateStyles();}
+            screenPaused=paused;screenIndicator=indicator;
+            screenX=x;screenY=y;
             if(dragging||resizing) { if(screen.DeviceName==device) return; CancelInteraction(); }
             work=screen.WorkingArea; device=screen.DeviceName; dpi=(int)screen.Dpi;
             int[] b=HeaderPlacement(work.X,work.Y,work.Width,work.Height,dpi);
             var dip=ReadHeaderSetting(SettingsPath,device);
             if(dip!=null) b=ClampHeader(work.X,work.Y,work.Width,work.Height,work.X+(int)Math.Round(dip[0]*dpi/96),work.Y+(int)Math.Round(dip[1]*dpi/96),(int)Math.Round(Math.Max(180,Math.Min(640,dip[2]))*dpi/96),(int)Math.Round(Math.Max(26,Math.Min(100,dip[3]))*dpi/96));
-            Bounds=new Rectangle(b[0],b[1],b[2],b[3]); Text=HeaderText(paused);
+            Bounds=new Rectangle(b[0],b[1],b[2],b[3]); Text=HeaderText(paused,indicator);
             if(!Visible) Show();
             DshInput.SetWindowPos(Handle,new IntPtr(-1),b[0],b[1],b[2],b[3],0x0010); RenderHeader();
         }
@@ -1595,7 +1717,7 @@ public static class DshOverlay
             rendering=true; IntPtr screen=IntPtr.Zero,dc=IntPtr.Zero,hbitmap=IntPtr.Zero,old=IntPtr.Zero;
             RenderSucceeded=false; RenderError=0;
             try {
-                using(var bitmap=DrawHeaderBitmap(Width,Height,dpi,pausedState,hover)) {
+                using(var bitmap=DrawHeaderBitmap(Width,Height,dpi,screenPaused,hover,screenIndicator,screenNotice)) {
                     screen=GetDC(IntPtr.Zero); dc=CreateCompatibleDC(screen); hbitmap=bitmap.GetHbitmap(Color.FromArgb(0)); old=SelectObject(dc,hbitmap);
                     var point=new HeaderPoint(Left,Top); var size=new HeaderSize(Width,Height); var origin=new HeaderPoint(0,0); var blend=new HeaderBlend { Op=0,Flags=0,Alpha=255,Format=1 };
                     RenderSucceeded=UpdateLayeredWindow(Handle,screen,ref point,ref size,dc,ref origin,0,ref blend,2);
@@ -1606,7 +1728,7 @@ public static class DshOverlay
         }
         protected override void WndProc(ref Message m)
         {
-            if(m.Msg==0x0084) { m.Result=new IntPtr(1); return; }
+            if(m.Msg==0x0084) { m.Result=new IntPtr(screenNotice?-1:1); return; }
             if(m.Msg==0x0021) {m.Result=new IntPtr(3);return;} base.WndProc(ref m);
         }
     }
@@ -2206,6 +2328,8 @@ function Capture-TargetWindow([long]$hwnd, [string]$path) {
   $helper = Join-Path $PSScriptRoot 'native/window-capture/bin/win-x64/dsh-window-capture.exe'
   if (-not (Test-Path -LiteralPath $helper)) { return @{ ok = $false; reason = 'capture-helper-missing'; method = 'wgc-window'; occlusionSafe = $true } }
   if (-not [IO.Path]::IsPathRooted($path) -or $path.Contains('"')) { return @{ ok = $false; reason = 'invalid-capture-path' } }
+  $dir = [IO.Path]::GetDirectoryName($path)
+  if (-not [string]::IsNullOrWhiteSpace($dir)) { [IO.Directory]::CreateDirectory($dir) | Out-Null }
   $info = New-Object Diagnostics.ProcessStartInfo
   $info.FileName = $helper
   $info.Arguments = '--hwnd ' + $hwnd + ' --path "' + $path + '" --timeout-ms 5000'
@@ -2242,12 +2366,27 @@ function Commit-InputSource($request) {
   [DshOverlay]::TrustedCaption=if($request.trustedCaption){[string]$request.trustedCaption}else{'会话名称暂不可用'}
 }
 
+function Write-LaunchPreparationStage($request,[string]$stage){
+  $process=[Diagnostics.Process]::GetCurrentProcess()
+  $event=@{event='launch-preparation';id=$request.id;stage=$stage;utc=[DateTime]::UtcNow.ToString('o');ticks=[Diagnostics.Stopwatch]::GetTimestamp();frequency=[Diagnostics.Stopwatch]::Frequency;callerPid=$PID;callerBirth=$process.StartTime.ToUniversalTime().Ticks.ToString();callerThreadId=[DshInput]::GetCurrentThreadId();apartment=[Threading.Thread]::CurrentThread.GetApartmentState().ToString()}
+  [Console]::Out.WriteLine(($event|ConvertTo-Json -Compress));[Console]::Out.Flush()
+  return $event
+}
+
 function Invoke-Request($req) {
   $cmd = [string]$req.cmd
+  if($env:DSH_INPUT_HEADER_HOST -eq '1' -and $cmd -notin @('sharedHeaders','status','shutdown','__globalPause')){return @{ok=$false;reason='header-host-not-input-executor';inputSent=$false}}
+  if($env:DSH_INPUT_READONLY -eq '1' -and $cmd -notin @('ping','status','windows','observe','checkObservation','capture','winInfo','windowAt','uiaInfo','debug','shutdown')){return @{ok=$false;reason='readonly-executor-cannot-promote';inputSent=$false}}
+  $keyboardRoot = $null
+  if($req.mode -eq 'invoke'){
+    $invokeCount=1
+    if($req -is [System.Collections.IDictionary]){if($req.Contains('count')){$invokeCount=[int]$req['count']}}elseif($req.PSObject.Properties['count']){$invokeCount=[int]$req.count}
+    if($cmd -ne 'click' -or -not $req.observationId -or -not $req.elementId -or [long]$req.hwnd -le 0 -or $null -ne $req.x -or $null -ne $req.y -or $req.windowObservationId -or ($req.button -and $req.button -ne 'left') -or $invokeCount -ne 1){return @{ok=$false;reason='invoke-requires-fresh-element';routeScope='element-invoke';attempted=$false;inputSent=$false;providerCalled=$false;verified=$false}}
+  }
   if($req.mode -eq 'value' -and ($cmd -ne 'type' -or -not $req.observationId -or -not $req.elementId -or [long]$req.hwnd -le 0 -or $null -ne $req.x -or $null -ne $req.y -or $req.windowObservationId)){return @{ok=$false;reason='value-requires-fresh-element';attempted=$false;verified=$false}}
   if($cmd -eq 'key' -and (($null -ne $req.x) -ne ($null -ne $req.y))){return @{ok=$false;reason='key-coordinate-pair-required';attempted=$false}}
   if($req.trustedOwnerJson){[DshInput]::SetStopOwner([string]$req.trustedOwnerJson)}
-  $controlled = $cmd -in @('click','type','key','scroll','drag','move','bounds','shellOpen') -or ($cmd -eq 'overlay' -and $req.show -ne $false)
+  $controlled = $cmd -in @('click','type','key','scroll','drag','move','bounds','reveal','shellOpen','prepareLaunch') -or ($cmd -eq 'overlay' -and $req.show -ne $false)
   if ($controlled) {
     if ($script:SessionFinished) { return @{ ok = $false; reason = 'session-finished'; note = '本次操作已finish；需要显式begin，begin不会清除暂停。' } }
     $paused = Get-PausedResult
@@ -2255,13 +2394,21 @@ function Invoke-Request($req) {
     $focusBlock=Get-FocusPolicyBlock $req
     if($null -ne $focusBlock){return $focusBlock}
     if ($req.mode -eq 'physical') { return @{ ok = $false; reason = 'physical-forbidden' } }
-    if($null -ne $req.windowObservationId) {
+    $rawKeyboard = $cmd -eq 'key' -or ($cmd -eq 'type' -and -not $req.observationId -and -not $req.elementId)
+    $windowGuardId = $req.windowObservationId
+    if($rawKeyboard -and $null -eq $windowGuardId) {
+      if($null -eq $script:CurrentObservation -or -not $script:CurrentObservation.id){return @{ok=$false;reason='observation-required';refresh='observe';attempted=$false;inputSent=$false}}
+      $windowGuardId = $script:CurrentObservation.id
+    }
+    if($null -ne $windowGuardId) {
       if($cmd -notin @('click','type','key','scroll','drag') -or $req.observationId -or $req.elementId){return @{ok=$false;reason='invalid-window-observation-guard'}}
+      if($rawKeyboard -and $script:CurrentObservation -and [long][DshInput]::RootOf([IntPtr]$script:CurrentObservation.hwnd) -ne [long]$script:CurrentObservation.hwnd){$script:CurrentObservation=$null;return @{ok=$false;reason='root-window-observation-required';refresh='observe-root';attempted=$false;inputSent=$false}}
       $guardHwnd=[long]$req.hwnd
       if($cmd -in @('type','key') -and $script:CurrentObservation -and $script:CurrentObservation.hwnd -ne $guardHwnd){$guardHwnd=[long][DshInput]::RootOf([IntPtr]$guardHwnd)}
-      $guard=Get-InputObservationStatus ([string]$req.windowObservationId) $guardHwnd
+      $guard=Get-InputObservationStatus ([string]$windowGuardId) $guardHwnd
       $script:CurrentObservation=$null
       if(-not $guard.ok){return $guard}
+      if($rawKeyboard){$keyboardRoot=$guardHwnd}
     }
     [DshInput]::SessionActive = $true
     if ($cmd -in @('click','type') -and ($req.elementId -or $req.observationId)) {
@@ -2277,17 +2424,24 @@ function Invoke-Request($req) {
   }
 
   switch ($cmd) {
+    'sharedHeaders' {
+      if($env:DSH_INPUT_HEADER_HOST -ne '1'){return @{ok=$false;reason='header-host-required'}}
+      [DshInput]::SessionActive=($req.activeLane -eq $true)
+      if($req.anyRunningLane -eq $true -and [DshInput]::Paused){[DshInput]::Resume()}
+      $rendered=[DshOverlay]::ApplySharedHeaders((ConvertTo-Json -InputObject @($req.screens) -Compress -Depth 8))
+      return @{ok=$rendered;sharedHeaders=[DshOverlay]::SharedHeaderDiagnostics()}
+    }
     'ping' { return @{ pong = $true } }
     'status' { $state=Get-StatusResult; if($req.details){$state.actualUI=[DshOverlay]::ActualDiagnostics()}; return $state }
     'begin' {
       [DshOverlay]::ResetSessionTarget()
       $script:SessionFinished = $false
       [DshInput]::SessionActive = $true
-      $script:CurrentObservation = $null
+      Clear-InputObservation 'begin'
       return Get-StatusResult
     }
     'finish' {
-      [DshOverlay]::ResetSessionTarget()
+      [DshOverlay]::ResetSessionTarget($false)
       [DshInput]::SessionActive = $false
       $script:SessionFinished = $true
       $script:CurrentObservation = $null
@@ -2349,13 +2503,29 @@ function Invoke-Request($req) {
         setWindowPosError = [DshOverlay]::LastSetWindowPosError
       }
     }
-    'shellOpen' {
+    'prepareLaunch' {
       $path=[string]$req.path
-      if($path -notmatch '^[A-Za-z]:[\\/]' -or (-not [IO.File]::Exists($path) -and -not [IO.Directory]::Exists($path))) { return @{ok=$false;opened=$false;reason='local-path-required'} }
+      if($path -notmatch '^[A-Za-z]:[\\/]' -or (-not [IO.File]::Exists($path) -and -not [IO.Directory]::Exists($path))){return @{ok=$false;reason='local-path-required'}}
+      $null=Write-LaunchPreparationStage $req 'indicator-enter'
+      Commit-InputSource $req;Show-InputIndicator ([int]$req.x) ([int]$req.y)
+      $null=Write-LaunchPreparationStage $req 'shortcut-prepare'
+      $prepared=Prepare-ManagedChromeLaunch $path
+      $preparation=Write-LaunchPreparationStage $req 'prepared'
+      return @{ok=$true;launch=$prepared;preparation=$preparation}
+    }
+    'shellOpen' {
+      return @{ok=$false;opened=$false;reason='async-launch-required';inputSent=$false}
+    }
+    'reveal' {
+      $h=[IntPtr][long]$req.hwnd
+      if(-not[DshInput]::IsWindow($h)-or[DshInput]::RootOf($h)-ne$h-or-not[DshInput]::IsWindowVisible($h)-or[DshInput]::IsIconic($h)){return @{ok=$false;reason='visible-nonminimized-top-level-required';inputSent=$false}}
+      $r=[DshInput]::WindowRect($h)
       Commit-InputSource $req
-      Show-InputIndicator ([int]$req.x) ([int]$req.y)
-      $launch=[DshInput]::ShellOpen($path,[int]$req.x,[int]$req.y)
-      return @{ok=($launch[0] -eq 1);opened=($launch[0] -eq 1);win32Error=$launch[1];pid=$launch[2];paused=[DshInput]::Paused;launchBackend='ShellExecuteExW';showRequest='SW_SHOWNOACTIVATE';monitorRequest=$true;note='启动/显示器/不激活均为请求；应用可自行激活，已启动的原子调用无法撤回，不自动重试。'}
+      Show-InputIndicator ([int]($r[0]+$r[2]/2)) ([int]($r[1]+$r[3]/2))
+      $before=[long][DshInput]::GetForegroundWindow()
+      $ok=[DshInput]::RevealWindow($h)
+      $after=[long][DshInput]::GetForegroundWindow()
+      return @{ok=$ok;hwnd=[long]$h;via='SetWindowPos-HWND_TOP';flags=0x0213;focusRequested=$false;foregroundBeforeSample=$before;foregroundAfterSample=$after;foregroundSampleChanged=($before-ne$after);backgroundReadiness='unverified';note='仅显式请求普通Z序置顶，不移动/缩放/永久置顶或主动激活；可能覆盖同屏其它窗。前后前台仅端点采样，不保证应用不自行激活；随后fresh观察renderer归属与页面响应。'}
     }
     'windows' { return @{ windows = (Get-WindowsList); monitors = @(Get-MonitorInfo) } }
     'bounds' {
@@ -2426,7 +2596,7 @@ function Invoke-Request($req) {
       return @{ ok = $true; via = 'overlay'; x = $x; y = $y; note = '只移动 AI 光标，没有移动主人的真实光标' }
     }
     'overlay' {
-      if ($req.show -eq $false) { [DshOverlay]::Hide(); return @{ ok = $true; visible = $false; cursorMode = $script:cursorMode; cursorState = $script:cursorStyle } }
+      if ($req.show -eq $false) { [DshOverlay]::Hide(); $headerReleased=[DshOverlay]::ReleaseSharedHeader(); return @{ ok = $headerReleased; visible = $false; sharedHeaderReleased=$headerReleased; cursorMode = $script:cursorMode; cursorState = $script:cursorStyle } }
       $preference=if($req.preferredMonitor){[string]$req.preferredMonitor}else{'secondary'}
       $preferred=[DshInput]::PreferredMonitor($preference)
       $x = if ($null -ne $req.x) { [int]$req.x } elseif ([DshOverlay]::HasLast) { [DshOverlay]::LastX } else { [int]($preferred.WorkingArea.X+$preferred.WorkingArea.Width/2) }
@@ -2558,6 +2728,7 @@ function Invoke-Request($req) {
         if ($child -ne [IntPtr]::Zero) { $h = $child }
       }
 
+      if($null -ne $keyboardRoot -and (-not [DshInput]::IsWindow($h) -or [long][DshInput]::RootOf($h) -ne $keyboardRoot)){return @{ok=$false;reason='keyboard-recipient-changed';refresh='observe';attempted=$false;inputSent=$false}}
       $cls = [DshInput]::WindowClass($h)
       if ($cls -match 'EDIT|Edit|TextBox') {
         $cur = [DshInput]::GetTextMessage($h)
@@ -2624,6 +2795,7 @@ function Invoke-Request($req) {
       if (-not [DshInput]::IsWindow($h)) { return @{ ok = $false; reason = 'target-hwnd-invalid'; hwnd = $targetHwnd } }
       $root=[DshInput]::RootOf($h)
       if($null -ne $req.x -and $null -ne $req.y){$h=[DshInput]::ChildAt($root,[int]$req.x,[int]$req.y)}
+      if($null -ne $keyboardRoot -and (-not [DshInput]::IsWindow($h) -or [long][DshInput]::RootOf($h) -ne $keyboardRoot)){return @{ok=$false;reason='keyboard-recipient-changed';refresh='observe';attempted=$false;inputSent=$false}}
       Commit-InputSource $req
       $ir=[DshInput]::WindowRect($h); Show-InputIndicator ([int]($ir[0]+$ir[2]/2)) ([int]($ir[1]+$ir[3]/2))
       $postedKeys = New-Object 'System.Collections.Generic.List[int]'
@@ -2718,6 +2890,9 @@ function Invoke-Request($req) {
       return @{ ok = $true; via = 'message-hwnd'; hwnd = [long]$h; target = [long]$root; verified = $false; note = '已投递给指定窗口；不移动真实鼠标' }
     }
     'capture' {
+      $privacyHwnd=if($req.hwnd){[long]$req.hwnd}else{[long][DshInput]::GetForegroundWindow()}
+      $privacy=Get-CaptureAuthPrivacy $privacyHwnd
+      if($privacy.sensitive){return @{ok=$false;reason='authentication-url-screenshot-suppressed';privacy=$privacy}}
       $path = [string]$req.path
       if ([string]::IsNullOrWhiteSpace($path)) { throw 'path required' }
       if ($req.hwnd -and $req.screenCopy -ne $true) { return Capture-TargetWindow ([long]$req.hwnd) $path }
@@ -2770,8 +2945,12 @@ function Invoke-Request($req) {
 
 $script:SessionFinished = ($env:DSH_INPUT_INITIAL_FINISHED -eq '1')
 . (Join-Path $PSScriptRoot 'lib/observation.ps1')
+. (Join-Path $PSScriptRoot 'lib/managed-chrome-launch.ps1')
 
-$assetDir = if($env:DSH_INPUT_ASSET_DIR){$env:DSH_INPUT_ASSET_DIR}elseif(Test-Path (Join-Path $PSScriptRoot 'assets/cursors/pointer.png')){Join-Path $PSScriptRoot 'assets/cursors'}else{[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../assets/cursors'))}
+$assetDir = Join-Path $PSScriptRoot 'assets/cursors'
+if (-not (Test-Path -LiteralPath (Join-Path $assetDir 'pointer.png'))) {
+  $assetDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../assets/cursors'))
+}
 try {
   [DshOverlay]::ConfigureStyles($assetDir)
   $metadataFile = Join-Path $assetDir 'cursor-metadata.json'
@@ -2789,12 +2968,13 @@ try {
 } catch { }
 
 [DshInput]::StartHotkey()
+[DshInput]::StartSharedPause()
 $ready = @{
   event = 'ready'
   pid = $PID
   uia = $script:uia
   hotkey = 'Ctrl+Esc（active时）或Ctrl+Alt+Q'
-  version = '0.6.2'
+  version = '0.7.6'
 }
 [Console]::Out.WriteLine((ConvertTo-Json $ready -Compress))
 [Console]::Out.Flush()
@@ -2808,7 +2988,7 @@ try { while ($true) {
     $req = $line | ConvertFrom-Json
     $id = $req.id
     $result = Invoke-Request $req
-    if ([DshInput]::Paused -and [string]$req.cmd -in @('click','type','key','scroll','drag','bounds') -and $result.ok -ne $false) {
+    if ([DshInput]::Paused -and [string]$req.cmd -in @('click','type','key','scroll','drag','bounds','reveal') -and $result.ok -ne $false) {
       $result = @{ ok = $false; paused = $true; reason = 'paused-partial'; partial = 'possible'; pauseReason = [DshInput]::PauseReason; note = '已暂停；本条动作可能已部分完成，先观察，不自动重发。' }
     }
     if ($result -is [hashtable]) {
@@ -2816,7 +2996,7 @@ try { while ($true) {
     }
     $resp = @{ id = $id; ok = $true; result = $result }
   } catch {
-    if ([DshInput]::Paused -and [string]$req.cmd -in @('click','type','key','scroll','drag','bounds')) {
+    if ([DshInput]::Paused -and [string]$req.cmd -in @('click','type','key','scroll','drag','bounds','reveal')) {
       $resp = @{ id = $id; ok = $true; result = @{ ok = $false; paused = $true; reason = 'paused-partial'; partial = 'possible'; pauseReason = [DshInput]::PauseReason; note = '已停止后续投递；可能部分完成，仅清理同目标已按下的键/按钮，不自动重发。' } }
     } else { $resp = @{ id = $id; ok = $false; error = $_.Exception.Message } }
   }

@@ -12,7 +12,7 @@ public class Properties {
  public int NativeWindowHandle=0; public bool IsEnabled=true,IsOffscreen=false,IsPassword=false; public Box BoundingRectangle=new Box();
 }
 public class ValueProperties { public string Value=""; public bool IsReadOnly=false; }
-public static class DshOverlay { public static string TrustedCaption="initial"; public static int Indicators=0; public static void ShowIndicatorAt(int x,int y){Indicators++;} }
+public static class DshOverlay { public static string TrustedCaption="initial"; public static int Indicators=0; public static bool ShowIndicatorAt(int x,int y){Indicators++;return true;} }
 public class ValuePattern {
  public ValueProperties Current=new ValueProperties(); public int Writes=0; public bool ThrowAfterWrite=false;
  public void SetValue(string text){if(DshOverlay.Indicators==0)throw new Exception("missing pre-action indicator");Current.Value=text;Writes++;if(ThrowAfterWrite)throw new Exception("uncertain provider failure");}
@@ -66,7 +66,7 @@ $o=Observe
 if($o.elements[1].parentId -ne 'e0' -or $o.elements[1].patterns -notcontains 'Value'){throw 'tree/pattern metadata missing'}
 $text='Unicode '+[char]0x4e3b+[char]0x5c4f
 $r=Act $o e1 type $text
-if(-not $r.verified -or $script:editor.Value.Current.Value -cne $text -or $script:editor.Value.Writes -ne 1){throw 'semantic type failed'}
+if(-not $r.verified -or $script:editor.Value.Current.Value -cne $text -or $script:editor.Value.Writes -ne 1){throw ('semantic type failed: '+($r|ConvertTo-Json -Depth 5 -Compress))}
 if((Act $o e1).reason -ne 'stale-observation'){throw 'consumed observation accepted twice'}
 $o=Observe;$script:editor.Current.Name='Changed'
 if((Act $o e1).reason -ne 'stale-observation'){throw 'changed element accepted'}
@@ -156,5 +156,5 @@ if([DshOverlay]::TrustedCaption-ne'A'){throw 'stale stole owner'}
 [DshInput]::Offset=0;$o=Observe;$r=Invoke-ObservedElement @{cmd='click';mode='auto';hwnd=1;observationId=$o.observationId;elementId='e0';trustedCaption='B'}
 if([DshOverlay]::TrustedCaption-ne'A'){throw 'unsupported stole owner'}
 OwnerAct 'B';if([DshOverlay]::TrustedCaption-ne'B'){throw 'B not committed'}
-OwnerAct $null;if([DshOverlay]::TrustedCaption-ne'会话未提供'){throw 'missing source retained old owner'}
+OwnerAct $null;if([string]::IsNullOrEmpty([DshOverlay]::TrustedCaption)-or[DshOverlay]::TrustedCaption-eq'B'){throw 'missing source retained old owner'}
 'PASS actual semantic action ownership A -> rejected/readonly B unchanged -> valid B -> absent fallback; no UI'

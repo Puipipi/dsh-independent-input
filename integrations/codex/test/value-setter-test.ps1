@@ -19,19 +19,19 @@ public class ElementFixture {
  public void SetFocus(){throw new Exception("forbidden focus");}
 }
 public class RootFixture {public int[] GetRuntimeId(){return new int[]{1};}}
-public static class DshInput {public static bool Paused=false,SessionActive=false;public static bool IsWindow(IntPtr h){return true;}public static int[] WindowRect(IntPtr h){return new int[]{0,0,600,400};}public static void CheckNotPaused(){if(Paused)throw new Exception("paused");}}
+public static class DshInput {public static bool Paused=false,SessionActive=false;public static long Foreground=11;public static IntPtr GetForegroundWindow(){return new IntPtr(Foreground);}public static IntPtr RootOf(IntPtr h){return h;}public static bool IsWindow(IntPtr h){return true;}public static int[] WindowRect(IntPtr h){return new int[]{0,0,600,400};}public static void CheckNotPaused(){if(Paused)throw new Exception("paused");}}
 '@
 function Load-Function($file,$name){$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput([IO.File]::ReadAllText($file),[ref]$tokens,[ref]$errors);$node=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true);if(-not $node){throw $name};Invoke-Expression ('function global:'+$name+$node.Extent.Text.Substring(('function '+$name).Length))}
 $obs=Join-Path $PSScriptRoot '../lib/observation.ps1';$sidecar=Join-Path $PSScriptRoot '../sidecar.ps1'
-foreach($name in @('Invoke-ObservedValue','Invoke-ObservedElement','Get-FocusPolicyBlock')){Load-Function $obs $name}
+foreach($name in @('Invoke-ObservedValue','Invoke-ObservedElement','Get-FocusPolicyBlock','Get-StaleObservationResult')){Load-Function $obs $name}
 Load-Function $sidecar 'Invoke-Request'
 function Get-PausedResult {return $null}
 function Commit-InputSource { [DshInput]::CheckNotPaused() }
-function Show-InputIndicator {if($script:MutateHint){$script:Element.Pattern.Current.Backing='changed'}}
+function Show-InputIndicator {if($script:MutateHint){$script:Element.Pattern.Current.Backing='changed'};if($script:SwitchForegroundHint){[DshInput]::Foreground=22}}
 function Show-StateAt {}
 function Get-ElementSnapshot($element){$out=[ordered]@{};foreach($key in $script:Shape.Keys){$out[$key]=$script:Shape[$key]};$out.runtimeId=($element.GetRuntimeId()-join ',');$out.value=if($out.password){$null}else{$element.Pattern.Current.Value};return $out}
 function Setup {
- $script:SessionFinished=$false;$script:focusPolicy='preserve';$script:MutateHint=$false
+ $script:SessionFinished=$false;$script:focusPolicy='preserve';$script:MutateHint=$false;$script:SwitchForegroundHint=$false;[DshInput]::Foreground=11
  $script:Element=New-Object ElementFixture;$script:Element.Pattern.Owner=$script:Element
  $script:Shape=[ordered]@{runtimeId='2';type='ControlType.Edit';enabled=$true;offscreen=$false;password=$false;nativePassword=$false;nativeReadOnly=$false;state=@{readonly=$false};patterns=@('Value');value='before';rect=@{x=10;y=20;width=100;height=30};nativeWindowHandle=0;nativeClass='css-class-not-a-type'}
 }
@@ -64,3 +64,11 @@ foreach($failure in @('Mismatch','ThrowSet','ThrowRead','ChangeIdentity')){
  if($r.ok -ne $false -or $r.attempted -ne $true -or $r.partial -ne 'possible' -or $script:Element.Pattern.Current.Writes -ne 1){throw ('write-uncertain/no-fallback: '+$failure)}
 }
 'PASS actual request/element/value functions: fresh IDs/types/readonly/password/coordinate refusal; append guard; no-op; one setter with delayed readback; mismatch/throw/identity change uncertain; no focus/legacy/native fallback'
+Setup;Observe;[DshInput]::Foreground=22;$r=Request
+if($r.reason-ne'value-requires-foreground-under-preserve'-or$r.providerCalled-ne$false-or$r.inputSent-ne$false-or$script:Element.Pattern.Current.Writes-ne0-or$script:Element.PatternGets-ne0){throw 'foreign foreground preserve reached provider'}
+Setup;Observe;[DshInput]::Foreground=22;$script:focusPolicy='allow-activation';$r=Request
+if(-not$r.verified-or$script:Element.Pattern.Current.Writes-ne1){throw 'persistent allow activation value regressed'}
+'PASS actual focus policy: foreign foreground zero provider/setter; own foreground legal Value; persistent allow-activation retains explicit semantics'
+Setup;Observe;$script:SwitchForegroundHint=$true;$r=Request
+if($r.reason-ne'value-requires-foreground-under-preserve'-or$r.providerCalled-ne$false-or$r.inputSent-ne$false-or$script:Element.Pattern.Current.Writes-ne0){throw 'foreground changed during hint still reached setter/fallback'}
+'PASS actual setter gate after indicator: initial own foreground becomes foreign, zero SetValue/no fallback'

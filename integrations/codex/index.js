@@ -1,3 +1,5 @@
+import { resolveAssets } from './lib/asset-paths.js'
+import {sanitizePublic,sanitizePublicError,hasAuthUrlSecrets} from './lib/auth-privacy.js'
 /**
  * dsh-independent-input · 独立鼠标键盘
  *
@@ -10,12 +12,12 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { InputEngine } from './lib/engine.js'
+import { ExecutionEnginePool } from './lib/execution-engine-pool.js'
 import { normalizeFocusPolicy, focusPolicyBlock, keyboardContractBlock } from './lib/focus-policy.js'
 import { presentObservation, presentWindows, presentStatus, presentControl, screenshotEvidence, observationEvidenceNote } from './lib/presentation.js'
 import { placeWindow, openOnMonitor } from './lib/window-actions.js'
 import { resolvePreferredMonitor } from './lib/window-placement.js'
 import { stopText } from './lib/stop-info.js'
-import {resolveAssets} from './lib/asset-paths.js'
 import { threadCaption } from './lib/thread-caption.js'
 
 export const name = 'independent-input'
@@ -24,6 +26,23 @@ export const inject = ['tools', 'attachments', 'webServer']
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url))
 const PREVIEW_DIR = join(resolveAssets(PLUGIN_DIR), 'previews')
 const SETTINGS_FILE = join(homedir(), '.dsh', 'independent-input', 'settings.json')
+const ownedPauseGuidance = '若已获得用户明确允许，原执行器直接调用 action:"resume" 一次，无需重复请示。若只需交还控制，确认恢复成功后立即调用 action:"finish"，期间不派发任何应用输入。'
+function ownPause(control,id){
+  if(!id||!control||control.busy===null||control.observationError)return false
+  const lane=control.owners?.find(owner=>owner.executionId===id)
+  return lane?.paused===true||
+    (control.ownStop?.executionId===id&&(control.turn==='resume-required'||control.ownStop.requiredAction==='resume'))||
+    (control.protocolVersion!==3&&control.ownerExecutionId===id&&!!control.pauseReason)
+}
+function pausedSessionResult(action,reason,control,id,details){
+  if(!['finish','begin'].includes(action)||!['execution-resume-required','desktop-paused','control-paused','lane-paused','control-paused-recovery-required'].includes(reason))return null
+  const owned=ownPause(control,id)
+  const state=action==='finish'?'finish 未释放控制权。':'begin 未开始独立操控。'
+  const text=owned?'本执行器仍处于暂停状态。'+state+ownedPauseGuidance:'控制仍暂停，或无法确认暂停属于本执行器。'+state+'等待原执行器处理。'
+  return toLosslessJson({text,meta:{ok:false,action,reason,inputSent:false,...(owned?{paused:true,requiredAction:'resume'}:{}),control:presentControl(control,details)}})
+}
+const controlErrorReason = error => error.code==='control-busy' ? error.control?.reason||error.code : error.code
+
 const STYLE_IDS = [
   'pointer', 'work', 'unavailiable', 'link', 'text',
   'cross', 'busy', 'move', 'vert', 'horz',
@@ -69,7 +88,10 @@ function statusText(s) {
     : `陪伴模式（一直显示，${size} · ${s?.cursorState || 'pointer'}）`
   const lines = [
     `独立输入${s?.runtimeVersion?' v'+s.runtimeVersion:''}：${paused}`,
-    ...(s?.control ? [`控制权[${s.control.scope}]：${s.control.busy===null?'未知，禁止获取':s.control.busy?'占用':'空闲'} · 项目=${s.control.ownerProjectName||'项目暂不可用'} · owner=${s.control.ownerName||(s.control.busy?'会话名称暂不可用':'无')} · ${s.control.reason} · 官方CU=${s.control.externalOfficialState}`] : []),
+    ...(s?.control ? [s.control.recoveryRequired?`旧协调器已退出（旧实例均已确认dead）；需受锁恢复，当前活动槽位尚未重建 · ${s.control.canAcquire?'可显式begin/排队触发复核':'仍受暂停或队列限制'} · ${s.control.reason}`:s.control.capacity?`控制准入[${s.control.scope}]：已用${s.control.occupied}/${s.control.capacity}，尚余${s.control.availableSlots??Math.max(0,s.control.capacity-s.control.occupied)}路 · ${s.control.canAcquire?'当前可begin/继续':'当前阻塞'}：${s.control.reason} · 官方CU=${s.control.externalOfficialState}`:`控制权[${s.control.scope}]：${s.control.busy===null?'未知，禁止获取':s.control.busy?'占用':'空闲'} · 项目=${s.control.ownerProjectName||'项目暂不可用'} · owner=${s.control.ownerName||(s.control.busy?'会话名称暂不可用':'无')} · ${s.control.reason} · 官方CU=${s.control.externalOfficialState}`] : []),
+    ...(s?.control?.owners&&!s.control.recoveryRequired?[`独立指针：${s.control.occupied}/${s.control.capacity} · ${s.control.owners.map(x=>`${x.projectName||'项目暂不可用'} / ${x.name||'会话名称暂不可用'}${x.paused?'（暂停）':''}`).join('；')||'无持有者'}`]:[]),
+    ...(s?.control?.stoppedExecutions?.length?[`待恢复：${s.control.stoppedExecutions.map(x=>`${x.projectName||'项目暂不可用'} / ${x.name||'会话名称暂不可用'} → ${x.requiredAction}`).join('；')}`]:[]),
+    ...(s?.control?.controllerFault?[`停止控制器故障：${stopText(s.control.controllerFault)}；健康重建后需fresh观察和显式begin，已有真实暂停仍须各自resume。`]:[]),
     ...(s?.control?.queue?.length?[`排队：${s.control.queue.map(t=>`${t.position}. ${t.projectName||'项目暂不可用'} / ${t.name||'会话名称暂不可用'}`).join('；')}`]:[]),
     ...((s?.stopInfo||s?.control?.stopInfo||s?.lastStop||s?.control?.lastStop)?[`${s.paused?'当前停止':'最近停止（当前未暂停）'}：${stopText(s.stopInfo||s.control?.stopInfo||s.lastStop||s.control?.lastStop)}`]:[]),
     `主人最近一次真实输入：${age}`,
@@ -161,15 +183,17 @@ function resultText(action, r) {
 function toolSpec() {
   return {
     name: 'independent_input',
-    description: 'Windows桌面默认独立输入。先status/windows确定授权hwnd，observe返回provider报告的UIA与可选截图；UIA/offscreen=false不保证当前可见，mappingVerified/occlusionSafe不验证业务内容fresh。有图先看实际画面，冲突仅只读fresh核对，不盲重试或自动改焦点/搬窗/切官方CU。用observationId+elementId执行一次click/type再observe。旧hwnd+物理坐标兼容。窗口capture不屏幕回退；mappingVerified=false不能从图片推坐标，显式rect/full为遮挡不安全的screen-copy。bounds仅授权搬窗，不激活。physical禁用，不主动移动系统鼠标/设置焦点；应用自身可能改变焦点。idle输入或begin开始，finish收尾且后续须begin；active物理Ctrl+Esc/CtrlAltQ暂停，begin不清暂停，resume仅用户明确继续。普通键鼠不结束。遵守宿主stop/权限，不自动切原生CUA。',
+    description: 'Windows桌面默认独立输入。先status/windows确定授权hwnd，observe返回provider报告的UIA与可选截图；UIA/offscreen=false不保证当前可见，mappingVerified/occlusionSafe不验证业务内容fresh。有图先看实际画面，冲突仅只读fresh核对，不盲重试或自动改焦点/搬窗/切官方CU。用observationId+elementId执行一次click/type再observe。旧hwnd+物理坐标兼容。窗口capture不屏幕回退；mappingVerified=false不能从图片推坐标，显式rect/full为遮挡不安全的screen-copy。bounds仅授权搬窗，不激活。physical禁用，不主动移动系统鼠标/设置焦点；应用自身可能改变焦点。begin清观察，先begin再observe；finish仅结束输入会话，yieldSeconds只提示资源让出期限、不暂停根任务；后续须begin；active物理Ctrl+Esc/CtrlAltQ暂停，begin不清暂停，resume仅用户明确继续。普通键鼠不结束。遵守宿主stop/权限，不自动切原生CUA。',
     parameters: {
+      launchTicket: {type:'string',description:'open_status：本execution/lease的open返回票据；只查原请求，不重新启动'},
+      yieldSeconds: {type:'number',description:'finish仅让出输入会话资源的秒数（1–86400）；只返回deadline，不暂停根任务、不后台调度或唤醒闲置聊天'},
       waitMs: {type:'number',description:'control_wait：单次等待0–45000ms；超时不授锁、不重放输入'},
       action: {
         type: 'string',
         required: true,
-        description: 'control_request | control_wait | control_cancel | status | windows | observe | capture | click | type | key | scroll | drag | move | bounds | place | open | begin | finish | pause | resume | overlay',
+        description: 'control_request | control_wait | control_cancel | status | windows | observe | capture | click | type | key | scroll | drag | move | bounds | place | reveal | open | begin | finish | pause | resume | overlay',
       },
-      windowObservationId: { type: 'string', description: 'observe返回的窗口几何guard；坐标click/type/key/scroll/drag可选，单次消费，与元素observationId/elementId互斥。仅核根runtime/几何，不保证内容原子快照。' },
+      windowObservationId: { type: 'string', description: 'observe返回的窗口guard，单次消费，与元素双ID互斥。raw type/key省略时必须隐式消费最近fresh窗口观察并核recipient所属根；没有观察或身份/几何变化则拒绝。click/scroll/drag仍可选。仅核根runtime/几何，不保证内容原子快照。' },
       details: { type: 'boolean', description: 'observe显式详细字段（默认紧凑）；内部完整签名不受影响' },
       maxTextChars: { type: 'integer', description: '外发Name/Value/标题每字段字符上限，1–16384，默认256；截断会返回Length/Truncated，不能视为全文' },
       title: { type: 'string', description: 'windows标题包含过滤（不区分大小写）' },
@@ -195,7 +219,7 @@ function toolSpec() {
       keys: { type: 'string', description: 'key：组合键，如 "ctrl+c"、"alt+tab"、"enter"' },
       mode: {
         type: 'string',
-        description: 'auto/message：native后台消息；ID仅支持标准Button/Edit。value：仅type+fresh元素双ID，窄ValuePattern写入/回读，可能由provider自行激活，不保证DOM事件。uia：默认preserve拒绝；仅用户持久allow-activation配置允许，仍可能激活。physical禁用',
+        description: 'auto/message：native后台消息；ID仅支持标准Button/Edit。invoke：仅click+fresh元素双ID+root hwnd，无坐标，启用onscreen Button/Hyperlink的InvokePattern；preserve要求目标当前系统前台根并在调用前复核。不主动请求激活；provider/应用仍可能改变焦点。不自动回退，调用后效果仍需观察；权限拒绝停止输入。value：仅type+fresh元素双ID；preserve时目标必须当前系统前台根，后台拒绝且不调用setter。窄ValuePattern写入/回读，可能由provider自行激活，不保证DOM事件。uia：默认preserve拒绝；仅用户持久allow-activation配置允许，仍可能激活。physical禁用',
       },
       delta: { type: 'number', description: 'scroll 滚轮量：正数向上、负数向下，默认 -120' },
       durationMs: { type: 'number', description: 'drag 持续时间，默认 400ms' },
@@ -304,8 +328,12 @@ export async function apply(ctx, rawConfig = {}, runtime = {}) {
   const log = (message) => { try { ctx?.logger?.info?.(`[independent-input] ${message}`) } catch { /* ignore */ } }
   const saved = await loadSavedSettings(log, runtime.settingsFile)
   let current = normalizeSettings(saved, normalizeSettings(rawConfig))
-  const engine = runtime.engine || new InputEngine({ log, ...current, ...(runtime.controlLease?{controlLease:runtime.controlLease}:{}), settingsFile: runtime.settingsFile || SETTINGS_FILE })
+  const engine = runtime.engine || (runtime.controlLease?new InputEngine({ log,...current,controlLease:runtime.controlLease,settingsFile:runtime.settingsFile||SETTINGS_FILE }):new ExecutionEnginePool({log,...current,settingsFile:runtime.settingsFile||SETTINGS_FILE}))
   const toolConfig = toolSpec()
+  // One completion receipt per trusted execution, retained across turns until
+  // a successful new begin/lease. Repeated finish never restarts a yield.
+  const inputCompletions=new Map(),inputSessionTails=new Map()
+  const resourceYieldFor=seconds=>({requestedSeconds:seconds,untilUtc:new Date(Date.now()+seconds*1000).toISOString(),continuation:'same-active-executor',taskPauseRequested:false,onDeadline:'control_request-then-control_wait',note:'仅让出本execution资源；同一原执行器保持active并有界等待，期限到后重新排队。不是根任务暂停，不唤醒闲置聊天；用户暂停整个任务或host硬stop仍立即停止，不重放旧pause。'})
 
   const tool = {
     ...toolConfig,
@@ -319,6 +347,7 @@ export async function apply(ctx, rawConfig = {}, runtime = {}) {
             meta: { ok: false, enabled: false },
           })
         }
+        if(args.yieldSeconds!==undefined && (action!=='finish'||!Number.isFinite(args.yieldSeconds)||args.yieldSeconds<1||args.yieldSeconds>86400))return toLosslessJson({text:'yieldSeconds仅用于finish，须为1–86400秒；未派发输入。',meta:{ok:false,reason:'invalid-resource-yield',attempted:false,inputSent:false}})
         const contractBlock=keyboardContractBlock(action,args)
         if(contractBlock)return toLosslessJson({text:contractBlock.note,meta:contractBlock})
         const focusBlock=focusPolicyBlock(action,args,current.focusPolicy)
@@ -346,13 +375,28 @@ export async function apply(ctx, rawConfig = {}, runtime = {}) {
           return toLosslessJson({ text: statusText(presentStatus(s,args.maxTextChars,args.details===true)), meta: presentStatus(s,args.maxTextChars,args.details===true) })
         }
         if (action === 'begin' || action === 'finish') {
-          const state = presentStatus(await request(action, {}, 10000),args.maxTextChars)
+          const completedLease=engine.control.owner?.leaseId||null
+          const state = presentStatus(await request(action, action==='finish'&&args.yieldSeconds!==undefined?{resourceYield:true}:{}, 10000),args.maxTextChars)
+          if(action==='finish' && state.ok!==false && state.sessionState==='finished' && !state.paused){
+            state.completionScope='input-session'
+            if(args.yieldSeconds!==undefined)state.resourceYield=resourceYieldFor(args.yieldSeconds)
+          }
+          const executionId=engine.control.executionId(trustedContext)
+          if(action==='finish'&&state.completionScope==='input-session'&&executionId)inputCompletions.set(executionId,{leaseId:completedLease,receipt:{ok:true,sessionState:'finished',paused:false,completionScope:'input-session',...(state.resourceYield?{resourceYield:state.resourceYield}:{})}})
+          if(action==='begin'&&state.ok!==false&&!state.paused){state.observationReset='begin';inputCompletions.delete(executionId)}
           state.control=await engine.control.status(trustedContext.threadId)
-          return toLosslessJson({ text: `${state.ok===false ? '操作未完成；控制权未释放。' : action === 'finish' ? '本次操作已收尾，后续输入须begin；暂停不会被清除。' : '操作会话已开始；若已暂停仍须用户明确继续。'}\n${statusText(state)}`, meta: state })
+          const blocked=pausedSessionResult(action,state.reason||(state.paused===true&&state.ok!==false?'lane-paused':null),state.control,executionId,args.details===true)
+          if(blocked)return blocked
+          return toLosslessJson({ text: `${state.ok===false ? '操作未完成；控制权未释放。' : action === 'finish' ? '本输入会话已收尾并释放自己的资源；不代表根任务完成或暂停。后续输入须begin；暂停不会被清除。' : '操作会话已开始；若已暂停仍须用户明确继续。'}\n${statusText(state)}`, meta: state })
         }
         if (action === 'place') {
           const r = await placeWindow({request},args.hwnd,args.monitor || current.preferredMonitor)
           return toLosslessJson({text:r.ok === false ? resultText(action,r) : '已请求目标窗口置于偏好屏；按实际rect重新observe，不保证应用不自行激活。',meta:r})
+        }
+        if(action==='open_status'){
+          if(typeof args.launchTicket!=='string')throw new Error('launch-ticket-required')
+          const r=await engine.control.launchStatus(args.launchTicket,args.details===true)
+          return toLosslessJson({text:r.ok===false?`未查询启动票据：${r.reason}；不重新启动。`:`启动状态：${r.launchState} · ${r.lastStage}。接受仅代表Shell返回，不代表应用健康；pending/unknown不得自动重开。`,meta:r})
         }
         if (action === 'open') {
           if(typeof args.path !== 'string' || !/^[A-Za-z]:[\\/]/.test(args.path)) throw new Error('open仅支持本地绝对文件/文件夹路径，不支持URI、UNC或任意shell命令')
@@ -361,7 +405,11 @@ export async function apply(ctx, rawConfig = {}, runtime = {}) {
           const item = await stat(path)
           if(!item.isFile() && !item.isDirectory()) throw new Error('open目标不是普通文件或文件夹')
           const r=await openOnMonitor({request},path,args.monitor || current.preferredMonitor)
-          return toLosslessJson({text:r.opened ? `已请求打开；${r.placementConfirmed ? '仅核对当前唯一新增顶层窗完整落在目标屏；仍须fresh观察主窗和文件内容（可能为启动器/闪屏）。' : '放置未确认，请观察候选窗口，不自动重新打开。'} 不激活/显示器仅是系统请求，前后焦点采样不是全程无失焦证明。` : resultText(action,r),meta:r})
+          return toLosslessJson({text:r.launchTicket?`单次启动：${r.launchState}；票据=${r.launchTicket}。同执行器可继续observe已授权对话框，open_status查询；不自动重试，接受不等于应用健康。`:r.opened ? `已请求打开；${r.placementConfirmed ? '仅核对当前唯一新增顶层窗完整落在目标屏；仍须fresh观察主窗和文件内容（可能为启动器/闪屏）。' : '放置未确认，请观察候选窗口，不自动重新打开。'} 不激活/显示器仅是系统请求，前后焦点采样不是全程无失焦证明。` : resultText(action,r),meta:r})
+        }
+        if (action === 'reveal') {
+          const r=await request('reveal',{hwnd:args.hwnd},10000)
+          return toLosslessJson({text:r.ok===false?resultText(action,r):'已显式请求普通Z序置顶（NOACTIVATE）；可能覆盖该屏其它窗。fresh观察目标/renderer；端点前台样本不证明全程保焦。',meta:r})
         }
         if (action === 'bounds') {
           const r = await request('bounds', { hwnd: args.hwnd, x: args.x, y: args.y, width: args.width, height: args.height }, 10000)
@@ -371,13 +419,14 @@ export async function apply(ctx, rawConfig = {}, runtime = {}) {
           const observed = await request('observe', { hwnd: args.hwnd, maxElements: args.maxElements }, 30000)
           if (observed.ok === false) return toLosslessJson({ text: resultText(action, observed), meta: observed })
           let screenshot = null
-          if (args.includeScreenshot) {
+          if (args.includeScreenshot && !observed.authUrlSecretsDetected && !hasAuthUrlSecrets(observed)) {
             screenshot = await capture(ctx, engine, { hwnd: args.hwnd, path: args.path }, runtime.shotsDir)
             if (screenshot.meta?.ok === false) return toLosslessJson({ text: screenshot.text, meta: { ...screenshot.meta, observationId: observed.observationId } })
             const checked = await request('checkObservation', { hwnd: args.hwnd, observationId: observed.observationId }, 10000)
             if (checked.ok === false) return toLosslessJson({ text: '截图期间窗口几何发生变化；fresh observe后再动作。', meta: checked })
           }
           const presented=presentObservation(observed,args,screenshot)
+          if(args.includeScreenshot && (observed.authUrlSecretsDetected || hasAuthUrlSecrets(observed))) presented.screenshotSuppressed='authentication-url'
           return toLosslessJson({ text: `观察 ${observed.observationId}：${observed.elements?.length || 0} 个UIA元素。${observationEvidenceNote(presented.evidence)}`, images: screenshot?.images || [], meta: { ...presented, screenshot: screenshot?.meta } })
         }
         if (action === 'windows') {
@@ -391,8 +440,20 @@ export async function apply(ctx, rawConfig = {}, runtime = {}) {
           return toLosslessJson({ text: `已暂停。\n${statusText(s)}`, meta: s })
         }
         if (action === 'resume') {
-          const s = presentStatus(await request('resume', {}, 10000),args.maxTextChars)
-          return toLosslessJson({ text: `已恢复。\n${statusText(s)}`, meta: s })
+          const result = await request('resume', {}, 10000)
+          const id = engine.control.executionId(trustedContext)
+          const control = await engine.control.status(id).catch(()=>null)
+          const lane = control?.owners?.find(owner=>owner.executionId===id)
+          const confirmed = id&&control&&control.busy!==null&&!control.observationError&&
+            (control.protocolVersion===3?lane?.paused===false&&!control.ownStop&&control.turn==='owned':
+              control.ownerExecutionId===id&&!control.pauseReason&&control.canAcquire===true)
+          const s = presentStatus({...result,control},args.maxTextChars,args.details===true)
+          if(result.ok!==false&&result.paused===false&&confirmed){
+            const siblings = control.desktopPaused?'其他执行器的暂停仍有效，新会话仍受桌面暂停约束。':''
+            return toLosslessJson({text:'本执行器已恢复。'+siblings+'\n'+statusText(s),meta:{...s,ok:true}})
+          }
+          const paused = result.paused===true||ownPause(control,id)
+          return toLosslessJson({text:paused?'本执行器仍处于暂停状态。已停止后续操作。':'未能确认恢复。已停止后续操作。',meta:{...s,ok:false,paused:paused?true:null,reason:result.reason||(paused?'resume-still-paused':'resume-unconfirmed'),inputSent:false}})
         }
         if (action === 'move') {
           const r = await request('move', { x: args.x, y: args.y }, 10000)
@@ -479,6 +540,9 @@ export async function apply(ctx, rawConfig = {}, runtime = {}) {
           meta: { ok: false, action, reason: 'unknown-action' },
         }
       } catch (error) {
+        const reason=controlErrorReason(error)
+        const paused=pausedSessionResult(action,reason,error.control,engine.control.executionId(trustedContext),args.details===true)
+        if(paused)return paused
         return toLosslessJson({
           text: `独立输入没完成：${error?.message || error}`,
           meta: { ok: false, action, reason: error.code || 'executor-error', partial: error.partial || null, ...(error.control?{control:error.control}:{}) },
@@ -498,19 +562,54 @@ export async function apply(ctx, rawConfig = {}, runtime = {}) {
     const checkCancelled=()=>engine.checkRequestCancelled?.(requestContext)
     return engine.context.run(requestContext,async()=>{
       const action=String(args.action||'status').toLowerCase()
+      const finishExecutionId=engine.control.executionId(trusted)
+      const runAction=async()=>{
       if(['control_request','control_wait','control_cancel'].includes(action)){
         if(!current.enabled&&action!=='control_cancel')return toLosslessJson({text:'独立输入总开关已关闭；未排队或续等。',meta:{ok:false,enabled:false,reason:'disabled'}})
         try {
           const control=action==='control_wait'?await engine.control.wait(trusted,{waitMs:args.waitMs,signal:options.signal}):action==='control_cancel'?await engine.control.cancel(trusted):await engine.control.request(trusted,{signal:options.signal})
-          return withReminder(toLosslessJson({text:control.turn==='ready'?'轮到你；先fresh观察，再begin获取控制权。':`控制队列：${control.turn} · 位置=${control.position} · ${control.waitResult||''}`,meta:{ok:true,control:presentControl(control,args.details===true)}}))
+          return withReminder(toLosslessJson({text:control.turn==='ready'?'轮到你；先begin获取控制权，再fresh观察目标。':`控制队列：${control.turn} · 位置=${control.position} · ${control.waitResult||''}`,meta:{ok:true,control:presentControl(control,args.details===true)}}))
         }catch(error){return toLosslessJson({text:error.message,meta:{ok:false,reason:options.signal?.aborted?'control-wait-cancelled':error.code||'control-error'}})}
       }
-      if(current.enabled && ['begin','finish','move','overlay','pause','resume','click','type','key','scroll','drag','bounds','place','open'].includes(action)){
-        try {checkCancelled();await engine.control.acquire(trusted,['resume','begin'].includes(action)?action:null);checkCancelled()}catch(error){return toLosslessJson({text:error.message,meta:{ok:false,reason:error.code,control:presentControl(error.control||await engine.control.status(trusted.threadId),args.details===true)}})}
+      const executionId=engine.control.executionId(trusted)
+      if(current.enabled&&args.yieldSeconds!==undefined&&(action!=='finish'||!Number.isFinite(args.yieldSeconds)||args.yieldSeconds<1||args.yieldSeconds>86400))return execute(args,trusted)
+      if(current.enabled&&action==='finish'&&inputCompletions.has(executionId)){
+        checkCancelled()
+        const previous=inputCompletions.get(executionId).receipt,control=await engine.control.status(executionId)
+        const paused=!!(control.pauseReason||control.desktopPaused||control.ownStop?.requiredAction==='resume')
+        return toLosslessJson({text:'此前输入会话已结束；返回原让出期限，不重新计时、不获取lease或自动恢复任务。',meta:{...previous,ok:!paused,paused,...(paused?{reason:'control-paused'}:{}),resourceYieldIdempotent:true,control:presentControl(control,args.details===true)}})
+      }
+      if(current.enabled&&action==='finish'&&args.yieldSeconds!==undefined){
+        checkCancelled();const control=await engine.control.status(executionId)
+        const own=control.owners?.find(x=>x.executionId===executionId)
+        if(ownPause(control,executionId))return pausedSessionResult(action,'execution-resume-required',control,executionId,args.details===true)
+        if(control.busy===null||control.desktopPaused||control.pauseReason&&own||control.ownStop?.requiredAction==='resume')return toLosslessJson({text:'当前控制状态未知或需要显式恢复；未清除暂停、未开始新的让出期限。',meta:{ok:false,reason:'resource-yield-control-unavailable',inputSent:false,control:presentControl(control,args.details===true)}})
+        if(control.protocolVersion===3&&Array.isArray(control.owners)&&!own){
+          if(control.position>0)await engine.control.cancel(trusted)
+          const receipt={ok:true,sessionState:'finished',paused:false,completionScope:'input-session',resourceState:'no-held-lane',resourceYield:resourceYieldFor(args.yieldSeconds)}
+          inputCompletions.set(executionId,{leaseId:null,receipt})
+          return toLosslessJson({text:'仅让出本execution的排队/输入资源，未获取新lease或启动backend；根任务不因此暂停。',meta:{...receipt,control:presentControl(await engine.control.status(executionId),args.details===true)}})
+        }
+      }
+      if(current.enabled && ['begin','finish','move','overlay','pause','resume','click','type','key','scroll','drag','bounds','place','reveal','open'].includes(action)){
+        try {checkCancelled();await engine.control.acquire(trusted,['resume','begin'].includes(action)?action:null);checkCancelled();const previous=inputCompletions.get(executionId);if(previous&&engine.control.owner?.leaseId&&engine.control.owner.leaseId!==previous.leaseId)inputCompletions.delete(executionId)}catch(error){
+          const control=error.control||await engine.control.status(trusted.threadId)
+          return pausedSessionResult(action,controlErrorReason(error),control,executionId,args.details===true)||
+            toLosslessJson({text:error.message,meta:{ok:false,reason:error.code,control:presentControl(control,args.details===true)}})
+        }
       }
       return withReminder(await execute(args,trusted))
+      }
+      if(!['begin','finish'].includes(action)||!current.enabled||!finishExecutionId)return runAction()
+      // Session transitions share one execution-local gate; waits, status and OOB stop do not.
+      const previous=inputSessionTails.get(finishExecutionId)||Promise.resolve()
+      const work=previous.catch(()=>{}).then(()=>{checkCancelled();return runAction()})
+      inputSessionTails.set(finishExecutionId,work)
+      try{return await work}finally{if(inputSessionTails.get(finishExecutionId)===work)inputSessionTails.delete(finishExecutionId)}
     })
   }
+  const publicExecute=tool.execute
+  tool.execute=async(...args)=>{try{return sanitizePublic(await publicExecute(...args))}catch(error){throw sanitizePublicError(error)}}
   const dispose = ctx.tools.register(defineTool(tool))
 
   const applySettings = async (next) => {
@@ -552,7 +651,7 @@ export async function apply(ctx, rawConfig = {}, runtime = {}) {
       }
       if (req.method === 'POST' && route === '/hide') {
         if (!current.enabled) return json(res, 200, { ok: true, enabled: false })
-        if(engine.control.owner?.executionId!==previewId)return json(res,409,{ok:false,reason:'preview-not-owner',control:await engine.control.status(previewId)})
+        if((engine.engineFor?engine.engineFor(previewId).control.owner:engine.control.owner)?.executionId!==previewId)return json(res,409,{ok:false,reason:'preview-not-owner',control:await engine.control.status(previewId)})
         const result=await engine.context.run(previewContext,async()=>{await engine.request('overlay',{show:false});return engine.request('finish',{},10000)})
         return json(res,result.ok===false?409:200,result)
       }
@@ -620,6 +719,7 @@ export async function apply(ctx, rawConfig = {}, runtime = {}) {
   }
   disposeRuntime.interrupt = reason => engine.interrupt(reason, { host: true })
   disposeRuntime.cancelRequest=context=>{
+    if(engine.cancelRequest)return engine.cancelRequest(context)
     if(context?.threadId&&engine.control.owner?.executionId===context.threadId)engine.interrupt('host-cancel',{host:true})
   }
   disposeRuntime.reminderDelivered=(context,leaseId)=>engine.control.delivered(context,leaseId)
@@ -646,7 +746,6 @@ async function capture(ctx, engine, args, shotsDir = join(homedir(), '.dsh', 'in
   }
 
   const path = args.path || join(shotsDir, `shot-${Date.now()}.png`)
-  await mkdir(dirname(path), { recursive: true })
   const saved = await engine.request('capture', { path, rect, hwnd: targetHwnd, screenCopy }, 30000)
   if (saved.ok === false) return toLosslessJson({ text: resultText('capture', saved), meta: saved })
 

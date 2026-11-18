@@ -15,6 +15,10 @@ Expected: every listed process exits 0 with PASS/GREEN. Provider/transport tests
 
 The asset test resolves both repository and standalone paths, decodes the original upstream 512x192 atlases, and compiles pure overlay placement methods without Show. It requires no personal cursor metadata. Root DSH entry files and assets are compared byte-for-byte to the upstream baseline during preparation; that is a regression boundary, not an actual DSH Host run.
 
+## Protocol v3 coverage
+
+The Windows suite exercises three independent execution lanes, fourth-request FIFO, native guardian shutdown, dead-executor recovery and retained pause provenance. Shared-header and resume checks exercise projections and receipt readback through isolated seams. Authentication checks exercise public output redaction and screenshot gating with synthetic input. The snapshot fixture initializes the staged MCP entry, deletes its simulated cache, and checks that the runtime and protocol still work. The packaging check builds both native helpers, stages the unchanged upstream artwork, and verifies the manifest-selected MCP entry with isolated temporary state. It also runs the fixed-helper EOF check and launch-ticket ownership check against a temporary process with no window.
+
 ## Native capture build (manual prerequisite, no screenshot)
 
 ```powershell

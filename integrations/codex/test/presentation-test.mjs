@@ -31,3 +31,7 @@ for(const [shot,imageEvidence] of [[null,'none'],[{images:[],meta:{path:'saved.p
 }
 assert.equal(JSON.stringify(elements),signature)
 console.log('PASS projection contract: provider/offscreen visibility labelled, virtual data retained, actual image attachment separate from saved-only, fresh content unverified, native Button/Edit IDs and background actions intact')
+const valueCandidate=presentObservation({...observed,elements:[{...virtual,type:'ControlType.Edit',patterns:['Value']}]})
+assert.equal(valueCandidate.elements[0].valueWrite,'foreground-root-under-preserve')
+assert.deepEqual(valueCandidate.elements[0].backgroundActions,[],'Value must not advertise unconditional background preserve capability')
+console.log('PASS conditional Value discoverability: foreground-under-preserve, native background actions unchanged')

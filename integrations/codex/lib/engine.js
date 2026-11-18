@@ -18,8 +18,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { StopTracker } from './stop-info.js'
-import {resolveAssets} from './asset-paths.js'
 import { ControlLease } from './control-lease.js'
+import {cleanupLaunchTemporary} from './launch-tickets.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SIDECAR = join(HERE, '..', 'sidecar.ps1')
@@ -110,9 +110,11 @@ export class InputEngine {
     this.ready = false
     this.buf = ''
     this.stderr = ''
+    this.readonlyBackend=!!this.control.supportsDual&&!this.control.owner
 
     const ps = resolvePowerShell()
-    const proc = this.spawnProcess(ps, [
+    const spawnExecutor=this.control.owner&&this.spawnProcess===spawn&&this.control.spawnExecutor?(_file,_args,options)=>this.control.spawnExecutor(options.env):this.spawnProcess
+    const proc = await spawnExecutor(ps, [
       '-NoLogo', '-NoProfile', '-NonInteractive', '-STA',
       '-ExecutionPolicy', 'Bypass', '-File', SIDECAR,
     ], {
@@ -120,9 +122,10 @@ export class InputEngine {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
+        ...(this.control.executorEnvironment?.()||{}),
         DSH_INPUT_FOCUS_POLICY: this.focusPolicy,
+        DSH_INPUT_RUNTIME_VERSION: RUNTIME_VERSION,
         DSH_INPUT_INITIAL_PAUSE_REASON: this.hostPauseReason,
-        DSH_INPUT_ASSET_DIR: join(resolveAssets(),'cursors'),
         DSH_INPUT_INITIAL_STOP_JSON: JSON.stringify(this.stops.current||this.control.owner?.stopInfo||null),
         DSH_INPUT_OWNER_JSON: JSON.stringify(this.control.owner||{}),
         DSH_INPUT_INITIAL_FINISHED: this.faulted ? '1' : '0',
@@ -134,7 +137,22 @@ export class InputEngine {
       },
     })
     this.proc = proc
-    if(this.control.owner) await this.control.bind(proc.pid)
+    proc.stdin.on?.('error',()=>{})
+    if(this.control.owner){
+      try{
+        await this.control.bind(proc.pid)
+        if(this.control.startupPermit)proc.stdin.write(JSON.stringify({cmd:'__launch',permit:this.control.startupPermit})+'\n')
+      }catch(error){
+        // A v3 child is still before compilation/hooks/input until the Job
+        // bind succeeds. Close only this uninitialized executor on bind failure.
+        const closed=new Promise(resolve=>proc.once('close',resolve))
+        proc.stdin.end();try{proc.kill()}catch{}
+        await Promise.race([closed,sleep(1500)])
+        if(proc.exitCode!==null||proc.signalCode){if(this.proc===proc)this.proc=null}
+        else this.stopFailure=Object.assign(new Error('executor-stop-unconfirmed'),{code:'executor-stop-unconfirmed'})
+        throw error
+      }
+    }
     proc.stdin.on?.('error', () => { if(this.proc === proc && !this.stopping) this.interrupt('backend-write-failed', {host:false,fault:true}) })
 
     proc.stdout.setEncoding('utf8')
@@ -194,12 +212,17 @@ export class InputEngine {
       if (message.event === 'pause-state') {
         if(message.paused)this.pauseEpoch++
         if (message.paused && !String(message.reason || '').startsWith('backend-')) {this.hostPauseReason=message.reason || 'paused';this.control.pause(this.hostPauseReason,this.stops.record(this.hostPauseReason,this.control.owner,message.stopInfo||null)).catch(error=>this.log(error.message))}
-        if(message.stopInfo?.kind==='fault'){this.stops.record(message.reason,this.control.owner,message.stopInfo,{fault:true});this.control.recordFault?.(message.stopInfo).catch(error=>this.log(error.message))}
+        if(message.stopInfo?.kind==='fault'){this.faulted=true;this.stops.record(message.reason,this.control.owner,message.stopInfo,{fault:true});this.control.recordFault?.(message.stopInfo).catch(error=>this.log(error.message));if(this.control.supportsDual)this.interrupt(message.reason||'backend-controller-fault',{host:false,fault:true})}
         if (!message.paused && !message.transportSealed && !this.stopping && !this.disposed){this.hostPauseReason='';this.stops.resume()}
         continue
       }
       if (message.event === 'ready') {
         if (!this.stopping) this.ready = true
+        continue
+      }
+      if(message.event==='launch-preparation'){
+        const pending=this.pending.get(message.id)
+        if(pending?.cmd==='shellOpen'&&['indicator-enter','shortcut-prepare','prepared'].includes(message.stage))pending.launchPreparation=Object.fromEntries(['id','stage','utc','ticks','frequency','callerPid','callerBirth','callerThreadId','apartment'].map(k=>[k,message[k]]))
         continue
       }
       const pending = this.pending.get(message.id)
@@ -216,6 +239,7 @@ export class InputEngine {
       } else {
         const error = new Error(message.error || 'sidecar 返回错误')
         if (/message-|PostMessage|ScreenToClient/.test(error.message)) { error.code='native-message-uncertain'; error.partial='possible' }
+        if(pending.cmd==='shellOpen'){error.launchStarted=false;error.launchPreparation=pending.launchPreparation}
         pending.reject(error)
       }
     }
@@ -224,7 +248,7 @@ export class InputEngine {
   failAll(error) {
     for (const [, pending] of this.pending) {
       clearTimeout(pending.timer)
-      pending.reject(error)
+      pending.reject(pending.cmd==='shellOpen'?Object.assign(new Error(error.message),error,{launchStarted:false,launchPreparation:pending.launchPreparation}):error)
     }
     this.pending.clear()
   }
@@ -248,13 +272,17 @@ export class InputEngine {
     const context=this.context.getStore() || trustedContext
     if(context.actorKind==='manual-preview'&&!['begin','overlay','finish','status','resume'].includes(cmd))throw Object.assign(new Error('手动预览主体仅能预览/收起光标'),{code:'preview-scope-only'})
     const controlled=!['ping','status','windows','observe','checkObservation','capture','winInfo','windowAt','uiaInfo','debug'].includes(cmd)
+    if(cmd==='shellOpen'&&!this.control.startLaunch)return {ok:false,opened:false,reason:'async-launch-coordinator-required',inputSent:false}
     if(controlled)this.checkRequestCancelled(context)
     if(controlled){await this.control.acquire(context,['resume','begin'].includes(cmd)?cmd:null);if(this.control.owner?.pauseReason&&!this.hostPauseReason)this.hostPauseReason=this.control.owner.pauseReason;if(this.control.owner?.stopInfo)this.stops.current=this.control.owner.stopInfo}
     if(controlled)this.checkRequestCancelled(context)
     if(controlled&&this.control.owner?.pauseReason&&!['resume','finish','pause'].includes(cmd))return {ok:false,paused:true,reason:'paused',pauseReason:this.control.owner.pauseReason,stopInfo:this.control.owner.stopInfo}
-    if(cmd==='status' && !this.proc && !this.starting && !this.disposed && !this.stopFailure) return {ok:true,runtimeVersion:RUNTIME_VERSION,controlProtocolVersion:2,backend:'not-started',paused:!!this.hostPauseReason,pauseReason:this.hostPauseReason,sessionState:this.faulted?'finished':'idle',stopInfo:this.stops.current,lastStop:this.stops.lastStop,control:await this.control.status(this.control.executionId(context))}
+    if(cmd==='status' && !this.proc && !this.starting && !this.disposed && !this.stopFailure) return {ok:true,runtimeVersion:RUNTIME_VERSION,controlProtocolVersion:this.control.supportsDual?3:2,backend:'not-started',paused:!!this.hostPauseReason,pauseReason:this.hostPauseReason,sessionState:this.faulted?'finished':'idle',stopInfo:this.stops.current,lastStop:this.stops.lastStop,control:await this.control.status(this.control.executionId(context))}
+    if(controlled&&this.control.supportsDual&&this.readonlyBackend&&this.proc)await this.closeBackendClean()
     await this.ensure()
     if(controlled){this.control.assert(this.control.executionId(context));await this.control.bind(this.proc.pid)}
+    const targetCommand=controlled&&this.control.supportsDual&&args.hwnd&&['click','type','key','scroll','drag','bounds','reveal'].includes(cmd)
+    if(targetCommand){await this.control.reserve(args.hwnd);await this.control.assertTarget(args.hwnd)}
     if(controlled)this.checkRequestCancelled(context)
     if(controlled&&epoch!==this.interruptEpoch)throw Object.assign(new Error('宿主已中止本批次；未派发动作'),{code:'host-interrupted'})
     const proc=this.proc
@@ -264,21 +292,40 @@ export class InputEngine {
       const timer = setTimeout(() => {
         this.interrupt(`backend-timeout:${cmd}`, { host: false, fault: true })
       }, timeoutMs)
-      this.pending.set(id, { resolve, reject, timer, cmd, pauseEpoch:this.pauseEpoch })
+      this.pending.set(id, { resolve, reject, timer, cmd, pauseEpoch:this.pauseEpoch,...(cmd==='shellOpen'?{launchPreparation:{id,stage:'prepare-request-dispatched'}}:{}) })
       try {
-        proc.stdin.write(`${JSON.stringify({ id, cmd, ...args, trustedOwnerJson: JSON.stringify(this.control.owner||{}), trustedCaption: typeof context.caption === "string" ? context.caption : "会话名称暂不可用" })}\n`)
+        proc.stdin.write(`${JSON.stringify({ id, cmd:cmd==='shellOpen'?'prepareLaunch':cmd, ...args, trustedOwnerJson: JSON.stringify(this.control.owner||{}), trustedCaption: typeof context.caption === "string" ? context.caption : "会话名称暂不可用" })}\n`)
       } catch (error) {
         this.pending.delete(id)
         clearTimeout(timer)
         reject(error)
       }
     })
-    if(cmd==='status'){result.runtimeVersion=RUNTIME_VERSION;result.controlProtocolVersion=2;result.control=await this.control.status(this.control.executionId(context))}
+    if(cmd==='shellOpen'){
+      if(result.ok===false)return result
+      try{
+        this.checkRequestCancelled(context)
+        if(epoch!==this.interruptEpoch||this.hostPauseReason)throw Object.assign(new Error('launch-stopped-before-start'),{code:'host-interrupted'})
+        const launch=await this.control.startLaunch({...result.launch,x:args.x,y:args.y,preparation:result.preparation,requestId:id})
+        if(epoch!==this.interruptEpoch||this.hostPauseReason)return {...launch,ok:false,paused:!!this.hostPauseReason,reason:'launch-interrupted-result-uncertain'}
+        return launch
+      }catch(error){await cleanupLaunchTemporary(result.launch?.temporaryPath);throw error}
+    }
+    if(cmd==='status'){result.runtimeVersion=RUNTIME_VERSION;result.controlProtocolVersion=this.control.supportsDual?3:2;result.control=await this.control.status(this.control.executionId(context));if(this.control.supportsDual)result.screenIndicator={mode:'shared-coordinator',visible:result.control.sharedHeaders?.some(x=>x.visible)||false,snapshots:result.control.sharedHeaders||[],freshness:'last-render-sample'}}
     if(cmd!=='resume'&&this.control.owner?.pauseReason){result.paused=true;result.pauseReason=this.control.owner.pauseReason;result.stopInfo=this.control.owner.stopInfo}
     if(cmd==='resume' && result?.paused===false){await this.control.resume();this.stops.resume()}
     if(cmd==='finish'&&result?.sessionState==='finished')result.completion={source:'manual-tool',reason:'completed',utcTimestamp:new Date().toISOString()}
-    if(cmd==='finish' && result?.ok!==false && result?.sessionState==='finished' && result?.paused===false && !this.hostPauseReason)await this.control.release(this.control.executionId(context))
+    if(cmd==='finish' && result?.ok!==false && result?.sessionState==='finished' && result?.paused===false && !this.hostPauseReason){if(this.control.requiresExecutorExit){await this.control.prepareFinish?.(args.resourceYield===true);await this.closeBackendClean()};await this.control.release(this.control.executionId(context))}
     return result
+  }
+
+  async closeBackendClean(){
+    const proc=this.proc;if(!proc)return
+    this.stopping=true
+    const closed=new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Object.assign(new Error('executor-stop-unconfirmed'),{code:'executor-stop-unconfirmed'})),5000);proc.once('close',()=>{clearTimeout(timer);resolve()})})
+    const id=++this.seq
+    proc.stdin.write(JSON.stringify({id,cmd:'shutdown'})+'\n')
+    await closed;this.readonlyBackend=false;this.stopping=false
   }
 
   interrupt(reason = 'host-cancel', { host = true, fault = false } = {}) {

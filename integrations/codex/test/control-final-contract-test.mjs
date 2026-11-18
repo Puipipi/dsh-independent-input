@@ -26,8 +26,8 @@ const engine2=new InputEngine({controlLease:control2,spawnProcess(){spawns++;thr
 const dispose2=await apply({tools:{register(t){tool2=t;return()=>{}}}},{},{defineTool:v=>v,settingsFile,engine:engine2})
 const abort2=new AbortController(),late=tool2.execute({action:'begin'},{threadId:'C'},{signal:abort2.signal});await started;abort2.abort();grantAcquire();assert.equal((await late).meta.reason,'host-interrupted');assert.equal(paused2,1);assert.equal(spawns,0);dispose2()
 const edit={type:'ControlType.Edit',enabled:true,offscreen:false,patterns:['Value'],nativeWindowHandle:0,password:false,state:{readonly:false}}
-const actions=e=>presentObservation({elements:[e]}).elements[0].backgroundActions
-assert.deepEqual(actions(edit),['type:value']);for(const change of [{offscreen:true},{enabled:false},{password:true},{nativePassword:true},{nativeReadOnly:true},{state:{readonly:true}},{type:'ControlType.Button'},{patterns:[]}])assert.deepEqual(actions({...edit,...change}),[])
-assert.deepEqual(actions({...edit,nativeWindowHandle:1,nativeClass:'Edit'}),['type','type:value']);assert.equal(control.owner.executionId,'B')
+const project=e=>presentObservation({elements:[e]}).elements[0]
+assert.equal(project(edit).valueWrite,'foreground-root-under-preserve');assert.deepEqual(project(edit).backgroundActions,[]);for(const change of [{offscreen:true},{enabled:false},{password:true},{nativePassword:true},{nativeReadOnly:true},{state:{readonly:true}},{type:'ControlType.Button'},{patterns:[]}])assert.equal(project({...edit,...change}).valueWrite,undefined)
+assert.deepEqual(project({...edit,nativeWindowHandle:1,nativeClass:'Edit'}).backgroundActions,['type']);assert.equal(control.owner.executionId,'B')
 console.log('PASS actual index disabled request/wait gate + cancel cleanup; compact/full control projections; trusted-owner cancellation isolation; real engine cancelled acquire starts no backend; Value capability/native compatibility')
 }finally{dispose();await rm(dir,{recursive:true,force:true})}

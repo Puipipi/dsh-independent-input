@@ -1,34 +1,31 @@
-0.6.2：会话名tooltip按实际文字测量行高保留原padding，并在首次显示/字体/DPI变化后重排，避免高DPI中文笔画裁切；Ctrl+Esc规则不变。
-
-0.6.1：本插件active停止手势改为Ctrl+Esc（左右Ctrl，排除Shift/Alt/Win）；单Esc不暂停本插件。宿主Esc/停止/拒绝规则不变，Ctrl+Alt+Q兼容保留。
-
 # Codex integration
 
-Independent Codex MCP/plugin runtime for Windows. This directory preserves the accepted 0.6.0 control, observation and input implementation separately from the original DSH entry points. It duplicates the runtime deliberately: no unverified DSH identity adapter or input policy change is imposed on the original plugin.
+Windows Codex MCP plugin version 0.7.6, control protocol v3. The Codex integration lives under this directory and uses the repository's existing cursor artwork.
 
-- Read-only UIA observation plus optional WGC image attachment; provider visibility and content freshness are not visual verification.
-- Trusted execution identities, shared desktop lease, FIFO request/wait/cancel, cancellable waits, one reminder per hold, and persistent Esc/host-stop provenance. Old clients and official computer-use are outside this lock; official activity remains unknown.
-- Native window messages; fresh observed writable ValuePattern elements support explicit `type` `mode:value` with a single setter and bounded exact readback. This verifies the value only, not every DOM framework or unchanged foreground focus.
-- Live monitor enumeration, target-screen feedback, cursor animation continuity and optional window placement. Physical input and automatic official-CU fallback remain disabled.
+- Up to three independent execution backends share a Windows desktop. The fourth request waits in FIFO order. Executions in the same root are mutually exclusive. Status reports separate execution and coordinator versions.
+- The shared screen header distinguishes finish, temporary resource yield, and a user stop. Finish releases the input session. Begin starts a new observation epoch. Only an explicit user-approved resume clears a paused execution, and its receipt reflects authoritative readback.
+- UIA observations and optional WGC screenshots provide scoped evidence. Native messages handle supported background inputs. Value and Invoke routes under the default preserve policy require the target's current foreground root. Password fields are excluded and authentication material in observations is redacted. The plugin does not automatically fall back to native Codex Computer Use.
+- Window opening requires authorization and can return a pending ticket. Poll its status before deciding what to do. A launch receipt confirms submission to Windows and window observation remains a separate check.
 
-See [verification](docs/verification.md) for isolated tests and the limits of prior live evidence. Run `npm test` here on Windows with Node 24. No dependency install is required for the automatic checks. No automatic test opens a GUI or sends application input.
+## Build and install
 
-## Build and package
-
-Run the following from this directory using installed Visual Studio C++ tools and Windows SDK. Use a new output directory of your choice:
+Use Windows 10/11, Windows PowerShell 5.1, Node.js 24, and a Codex version with local plugin support. A source checkout needs Visual Studio C++ tools and the Windows SDK to build the WGC capture helper. From this directory:
 
 ```powershell
-cmd /c native\window-capture\build.cmd
-$out = Join-Path $env:TEMP 'independent-input-package'
-powershell.exe -NoProfile -File scripts/package-codex.ps1 -OutputDirectory $out
-Expand-Archive -LiteralPath (Join-Path $out 'dsh-independent-input-codex-0.6.2.zip') -DestinationPath (Join-Path $out 'marketplace')
-codex plugin marketplace add (Join-Path $out 'marketplace/dsh-independent-input') --json
-codex plugin add dsh-independent-input@dsh-independent-input-local --json
-codex plugin list --marketplace dsh-independent-input-local --json
+.\native\window-capture\build.cmd
+powershell.exe -NoProfile -File scripts/package-codex.ps1 -OutputDirectory <absolute-output-directory>
 ```
 
-The generated extracted plugin contains its own assets and native helper. **Do not install this unstaged development directory directly:** its repository-relative assets will not exist in an isolated cache. The commands install a plugin; they are not part of automatic verification. Generated binaries/ZIPs are ignored and not committed.
+Extract the resulting ZIP and use the extracted `dsh-independent-input` directory. The packager builds the launch helper, stages both native helpers with their source, and adds the upstream assets and their NOTICE. The packaged MCP entry takes a content-checked snapshot of its runtime files, including these assets, before starting. Install from the extracted package:
 
-The development checkout resolves assets from the repository root. Packaging copies those unchanged upstream assets into the standalone stage; no personal video-frame artwork or metadata is required. Root DSH runtime/assets are unchanged. Their existing artwork attribution/terms remain in the root NOTICE; no additional art license is asserted. Local personal skins are not included or required.
+```powershell
+codex plugin marketplace add <absolute-path-to-extracted-dsh-independent-input>
+codex plugin add dsh-independent-input@dsh-independent-input-local
+codex plugin list --json
+```
 
-The queue workflow keeps the original authorized CU executor active while waiting, renews waits up to 45 seconds each, and cancels its own ticket on stop. Idle chats cannot be proactively awakened. A parent with independent work may let the same CU child wait and report through its existing parent-child channel; no new background model or cross-project dispatcher is created.
+Follow the Codex hook trust and refresh prompts. When upgrading from protocol v2, let existing owners and waiters finish before starting the new runtime. Check runtime and coordinator versions after refresh. The input hook supplies routing guidance. Desktop actions still require user authorization.
+
+## Verification
+
+Run `npm test` here on Windows. [Verification and limits](docs/verification.md) describes the isolated tests and historical desktop evidence. Development and packaging use the existing upstream artwork and preserve its separate terms in the repository NOTICE. The package includes that notice at `assets/NOTICE`.
