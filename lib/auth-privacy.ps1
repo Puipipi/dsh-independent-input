@@ -23,6 +23,8 @@ function Protect-PublicObservation($observation) {
   return $observation
 }
 function Get-CaptureAuthPrivacy([long]$hwnd) {
+  $title=[DshInput]::WindowTitle([IntPtr]$hwnd)
+  if((Protect-AuthUrlText $title) -cne $title){return @{checked=$true;sensitive=$true}}
   if(-not $script:uia){return @{checked=$false;reason='uia-unavailable'}}
   try {
     $root=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$hwnd)

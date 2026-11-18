@@ -525,7 +525,6 @@ async function capture(ctx, engine, args) {
   }
 
   const path = args.path || join(homedir(), '.dsh', 'independent-input', 'shots', `shot-${Date.now()}.png`)
-  await mkdir(dirname(path), { recursive: true })
   const saved = await engine.request('capture', { path, rect }, 30000)
 
   if(saved.ok===false)return toLosslessJson({text:resultText('capture',saved),meta:saved})
